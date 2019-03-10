@@ -1,6 +1,14 @@
 use std::usize;
 use std::i32;
 
+#[repr(transparent)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub struct NodeId(u32);
+
+impl NodeId {
+    fn to_usize(self) -> { self as usize }
+}
+
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub struct DeviceIntSize {
     pub x: i32,
@@ -235,7 +243,7 @@ fn create_passes_eager(
     }
 }
 
-/// Assign a render target to each pass using a "ping-pong" scheme using only two render targets. 
+/// Assign a render target to each pass with a "ping-pong" scheme using only two render targets.
 ///
 /// In order to ensure that a node never reads and writes from the same target, some blit nodes
 /// may be inserted in the graph.
