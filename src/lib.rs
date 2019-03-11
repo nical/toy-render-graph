@@ -6,7 +6,7 @@ use std::i32;
 pub struct NodeId(u32);
 
 impl NodeId {
-    fn to_usize(self) -> { self as usize }
+    fn to_usize(self) -> usize { self.0 as usize }
 }
 
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -23,13 +23,13 @@ pub fn size2(x: i32, y: i32) -> DeviceIntSize {
 pub struct Node {
     name: String,
     size: DeviceIntSize,
-    dependencies: Vec<usize>,
+    dependencies: Vec<NodeId>,
 }
 
 #[derive(Clone)]
 pub struct Graph {
     nodes: Vec<Node>,
-    roots: Vec<usize>,
+    roots: Vec<NodeId>,
 }
 
 pub struct BuiltGraph {
@@ -37,7 +37,7 @@ pub struct BuiltGraph {
 }
 
 pub struct Pass {
-    pub nodes: Vec<usize>,
+    pub nodes: Vec<NodeId>,
     pub target: u32,
 }
 
@@ -49,8 +49,8 @@ impl Graph {
         }
     }
 
-    pub fn add_node(&mut self, name: &str, size: DeviceIntSize, deps: &[usize]) -> usize {
-        let id = self.nodes.len();
+    pub fn add_node(&mut self, name: &str, size: DeviceIntSize, deps: &[NodeId]) -> NodeId {
+        let id = NodeId(self.nodes.len() as u32);
         self.nodes.push(Node {
             name: name.to_string(),
             size,
@@ -60,7 +60,7 @@ impl Graph {
         id
     }
 
-    pub fn add_root(&mut self, id: usize) {
+    pub fn add_root(&mut self, id: NodeId) {
         self.roots.push(id);
     }
 }
@@ -149,14 +149,15 @@ fn cull_nodes(graph: &Graph, active_nodes: &mut Vec<bool>) {
     }
 }
 
-fn mark_active_node(id: usize, nodes: &[Node], active_nodes: &mut [bool]) {
-    if active_nodes[id] {
+fn mark_active_node(id: NodeId, nodes: &[Node], active_nodes: &mut [bool]) {
+    let idx = id.to_usize();
+    if active_nodes[idx] {
         return;
     }
 
-    active_nodes[id] = true;
+    active_nodes[idx] = true;
 
-    for &dep in &nodes[id].dependencies {
+    for &dep in &nodes[idx].dependencies {
         mark_active_node(dep, nodes, active_nodes);
     }
 }
@@ -167,18 +168,23 @@ fn mark_active_node(id: usize, nodes: &[Node], active_nodes: &mut [bool]) {
 ///
 /// This method assumes that nodes are already sorted in a valid execution order: nodes can only
 /// depend on the result of nodes that appear before them in the array.
-fn create_passes_simple(nodes: &[Node], active_nodes: &[bool], passes: &mut Vec<Pass>, node_passes: &mut [i32]) {
+fn create_passes_simple(
+    nodes: &[Node],
+    active_nodes: &[bool],
+    passes: &mut Vec<Pass>,
+    node_passes: &mut [i32]
+) {
 
     passes.push(Pass { nodes: Vec::new(), target: 0 });
 
-    for id in 0..nodes.len() {
-        if !active_nodes[id] {
+    for idx in 0..nodes.len() {
+        if !active_nodes[idx] {
             continue;
         }
 
         let mut dependent_pass: i32 = -1;
-        for &dep in &nodes[id].dependencies {
-            dependent_pass = i32::max(dependent_pass, node_passes[dep]);
+        for dep in &nodes[idx].dependencies {
+            dependent_pass = i32::max(dependent_pass, node_passes[dep.to_usize()]);
         }
 
         assert!(dependent_pass < passes.len() as i32);
@@ -190,8 +196,8 @@ fn create_passes_simple(nodes: &[Node], active_nodes: &[bool], passes: &mut Vec<
             });
         }
 
-        node_passes[id] = passes.len() as i32 - 1;
-        passes.last_mut().unwrap().nodes.push(id);
+        node_passes[idx] = passes.len() as i32 - 1;
+        passes.last_mut().unwrap().nodes.push(NodeId(idx as u32));
     }
 }
 
@@ -211,14 +217,14 @@ fn create_passes_eager(
         let current_pass = passes.len() as i32;
         let mut current_pass_nodes = Vec::new();
 
-        'pass_loop: for id in 0..nodes.len() {
-            if !active_nodes[id] {
+        'pass_loop: for idx in 0..nodes.len() {
+            if !active_nodes[idx] {
                 continue;
             }
 
             let mut dependent_pass: i32 = -1;
-            for &dep in &nodes[id].dependencies {
-                let pass = node_passes[dep];
+            for &dep in &nodes[idx].dependencies {
+                let pass = node_passes[dep.to_usize()];
                 if pass >= current_pass {
                     continue 'pass_loop;
                 }
@@ -227,9 +233,9 @@ fn create_passes_eager(
 
             // Mark the node inactive so that we don't attempt to add it to another
             // pass. 
-            active_nodes[id] = false;
-            node_passes[id] = current_pass;
-            current_pass_nodes.push(id);
+            active_nodes[idx] = false;
+            node_passes[idx] = current_pass;
+            current_pass_nodes.push(NodeId(idx as u32));
         }
 
         if current_pass_nodes.is_empty() {
@@ -258,9 +264,9 @@ fn assign_targets_ping_pong(
         let target = p as u32 % 2;
         passes[p].target = target;
         for nth_node in 0..passes[p].nodes.len() {
-            let n = passes[p].nodes[nth_node];
+            let n = passes[p].nodes[nth_node].to_usize();
             for nth_dep in 0..nodes[n].dependencies.len() {
-                let dep = nodes[n].dependencies[nth_dep];
+                let dep = nodes[n].dependencies[nth_dep].to_usize();
                 let dep_pass = node_passes[dep] as usize;
 
                 // Can't both read and write the same target.
@@ -271,11 +277,11 @@ fn assign_targets_ping_pong(
                         source
                     } else {
                         // Otherwise add a blit task.
-                        let blit_id = nodes.len();
+                        let blit_id = NodeId(nodes.len() as u32);
                         let size = nodes[dep].size;
                         nodes.push(Node {
                             name: format!("blit({:?})", dep),
-                            dependencies: vec![dep],
+                            dependencies: vec![NodeId(dep as u32)],
                             size
                         });
                         node_redirects.push(None);
@@ -319,7 +325,7 @@ fn it_works() {
     for i in 0..built.passes.len() {
         println!("# pass {:?} target {:?}", i, built.passes[i].target);
         for &node in &built.passes[i].nodes {
-            println!("- node {:?} ({:?})", graph_1.nodes[node].name, node);
+            println!("- node {:?} ({:?})", graph_1.nodes[node.to_usize()].name, node);
         }
     }
 
@@ -332,7 +338,7 @@ fn it_works() {
     for i in 0..built.passes.len() {
         println!("# pass {:?} target {:?}", i, built.passes[i].target);
         for &node in &built.passes[i].nodes {
-            println!("- node {:?} ({:?})", graph_2.nodes[node].name, node);
+            println!("- node {:?} ({:?})", graph_2.nodes[node.to_usize()].name, node);
         }
     }
 }
