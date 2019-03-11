@@ -1,111 +1,19 @@
-use std::usize;
-use std::i32;
+pub mod misc;
 
-#[repr(transparent)]
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
-pub struct NodeId(u32);
-
-impl NodeId {
-    pub fn to_usize(self) -> usize { self.0 as usize }
-}
-
-fn node_id(idx: usize) -> NodeId {
-    debug_assert!(idx < std::u32::MAX as usize);
-    NodeId(idx as u32)
-}
-
-#[repr(transparent)]
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
-pub struct TargetId(u32);
-
-impl TargetId {
-    pub fn to_usize(self) -> usize { self.0 as usize }
-}
-
-fn target_id(idx: usize) -> TargetId {
-    debug_assert!(idx < std::u32::MAX as usize);
-    TargetId(idx as u32)
-}
-
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
-pub struct AllocId(TargetId, u32);
-
-pub trait AtlasAllocator {
-    fn allocate(&mut self, target: TargetId, size: DeviceIntSize) -> (AllocId, DeviceIntBox2D);
-    fn deallocate(&mut self, id: AllocId);
-}
-
-pub struct DummyAtlasAllocator { n: u32 }
-
-impl DummyAtlasAllocator {
-    fn new() -> Self {
-        DummyAtlasAllocator { n: 0 }
-    }
-}
-
-impl AtlasAllocator for DummyAtlasAllocator {
-    fn allocate(&mut self, target: TargetId, size: DeviceIntSize) -> (AllocId, DeviceIntBox2D) {
-        self.n += 1;
-        (AllocId(target, self.n), DeviceIntBox2D::zero())
-    }
-
-    fn deallocate(&mut self, _id: AllocId) {}
-}
-
-#[derive(Copy, Clone, Debug, PartialEq)]
-pub struct DeviceIntSize {
-    pub width: i32,
-    pub height: i32,
-}
-
-#[derive(Copy, Clone, Debug, PartialEq)]
-pub struct DeviceIntPoint {
-    pub x: i32,
-    pub y: i32,
-}
-
-#[derive(Copy, Clone, Debug, PartialEq)]
-pub struct DeviceIntBox2D {
-    pub min: DeviceIntPoint,
-    pub max: DeviceIntPoint,
-}
-
-impl DeviceIntBox2D {
-    fn zero() -> Self {
-        DeviceIntBox2D {
-            min: DeviceIntPoint { x: 0, y: 0 },
-            max: DeviceIntPoint { x: 0, y: 0 },
-        }
-    }
-}
-
-pub fn size2(width: i32, height: i32) -> DeviceIntSize {
-    DeviceIntSize { width, height }
-}
+pub use std::i32;
+use crate::misc::*;
 
 #[derive(Clone)]
 pub struct Node {
-    name: String,
-    size: DeviceIntSize,
-    dependencies: Vec<NodeId>,
+    pub name: String,
+    pub size: DeviceIntSize,
+    pub dependencies: Vec<NodeId>,
 }
 
 #[derive(Clone)]
 pub struct Graph {
     nodes: Vec<Node>,
     roots: Vec<NodeId>,
-}
-
-pub struct BuiltGraph {
-    nodes: Vec<Node>,
-    roots: Vec<NodeId>,
-    node_target_rects: Vec<DeviceIntBox2D>,
-    pub passes: Vec<Pass>,
-}
-
-pub struct Pass {
-    pub nodes: Vec<NodeId>,
-    pub target: TargetId,
 }
 
 impl Graph {
@@ -130,6 +38,24 @@ impl Graph {
     pub fn add_root(&mut self, id: NodeId) {
         self.roots.push(id);
     }
+}
+
+pub struct BuiltGraph {
+    pub nodes: Vec<Node>,
+    pub roots: Vec<NodeId>,
+    pub allocated_rects: Vec<Option<AllocatedRect>>,
+    pub passes: Vec<Pass>,
+}
+
+pub struct Pass {
+    pub nodes: Vec<NodeId>,
+    pub target: TargetId,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub struct AllocatedRect {
+    pub alloc_id: AllocId,
+    pub rect: DeviceIntBox2D
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
@@ -175,22 +101,20 @@ impl GraphBuilder {
             &mut node_passes,
         );
 
-        let mut node_target_rects = vec![DeviceIntBox2D::zero(); graph.nodes.len()];
-        let mut node_target_allocs = vec![None; graph.nodes.len()];
+        let mut allocated_rects = vec![None; graph.nodes.len()];
         reset(&mut active_nodes, graph.nodes.len(), false);
         allocate_target_rects(
             &graph,
             &passes,
             &mut active_nodes,
-            &mut node_target_rects,
-            &mut node_target_allocs,
+            &mut allocated_rects,
             allocator,
         );
 
         BuiltGraph {
             nodes: graph.nodes,
             roots: graph.roots,
-            node_target_rects,
+            allocated_rects,
             passes,
         }
     }
@@ -354,7 +278,7 @@ fn assign_targets_ping_pong(
                         node_redirects[dep] = Some(blit_id);
 
                         passes[p - 1].nodes.push(blit_id);
-                        
+
                         blit_id
                     };
 
@@ -365,37 +289,13 @@ fn assign_targets_ping_pong(
     }
 }
 
-fn count_references(graph: &Graph, visited: &mut[bool], ref_counts: &mut [i32]) {
-    // Recursively call this function starting form the roots.
-    fn count_refs(graph: &Graph, id: NodeId, visited: &mut[bool], ref_counts: &mut [i32]) {
-        let idx = id.to_usize();
-        if visited[idx] {
-            return;
-        }
-
-        ref_counts[idx] += 1;
-
-        for &dep in &graph.nodes[idx].dependencies {
-            count_refs(graph, dep, visited, ref_counts);
-        }
-    }
-
-    for &root in &graph.roots {
-        count_refs(graph, root, visited, ref_counts);
-    }
-}
-
 fn allocate_target_rects(
     graph: &Graph,
     passes: &[Pass],
     visited: &mut[bool],
-    node_target_rects: &mut Vec<DeviceIntBox2D>,
-    node_target_allocations: &mut Vec<Option<AllocId>>,
+    allocated_rects: &mut Vec<Option<AllocatedRect>>,
     allocator: &mut dyn AtlasAllocator,
 ) {
-    reset(node_target_rects, graph.nodes.len(), DeviceIntBox2D::zero());
-    reset(node_target_allocations, graph.nodes.len(), None);
-
     let mut last_node_refs: Vec<NodeId> = Vec::with_capacity(graph.nodes.len());
     let mut pass_last_node_ranges: Vec<std::ops::Range<usize>> = vec![0..0; passes.len()];
 
@@ -432,16 +332,14 @@ fn allocate_target_rects(
         for &node in &pass.nodes {
             let node_idx = node.to_usize();
             let size = graph.nodes[node_idx].size;
-            let (alloc_id, rect) = allocator.allocate(pass.target, size);
-            node_target_rects[node_idx] = rect;
-            node_target_allocations[node_idx] = Some(alloc_id);
+            allocated_rects[node_idx] = Some(allocator.allocate(pass.target, size));
         }
 
         // Deallocations we can perform after this pass.
         let finished_range = pass_last_node_ranges[pass_index].clone();
         for finished_node in &last_node_refs[finished_range] {
             let node_idx = finished_node.to_usize();
-            allocator.deallocate(node_target_allocations[node_idx].unwrap());
+            allocator.deallocate(allocated_rects[node_idx].unwrap().alloc_id);
         }
     }
 }
