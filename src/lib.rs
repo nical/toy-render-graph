@@ -6,7 +6,12 @@ use std::i32;
 pub struct NodeId(u32);
 
 impl NodeId {
-    fn to_usize(self) -> usize { self.0 as usize }
+    pub fn to_usize(self) -> usize { self.0 as usize }
+}
+
+fn node_id(idx: usize) -> NodeId {
+    debug_assert!(idx < std::u32::MAX as usize);
+    NodeId(idx as u32)
 }
 
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -50,7 +55,7 @@ impl Graph {
     }
 
     pub fn add_node(&mut self, name: &str, size: DeviceIntSize, deps: &[NodeId]) -> NodeId {
-        let id = NodeId(self.nodes.len() as u32);
+        let id = node_id(self.nodes.len());
         self.nodes.push(Node {
             name: name.to_string(),
             size,
@@ -197,7 +202,7 @@ fn create_passes_simple(
         }
 
         node_passes[idx] = passes.len() as i32 - 1;
-        passes.last_mut().unwrap().nodes.push(NodeId(idx as u32));
+        passes.last_mut().unwrap().nodes.push(node_id(idx));
     }
 }
 
@@ -235,7 +240,7 @@ fn create_passes_eager(
             // pass. 
             active_nodes[idx] = false;
             node_passes[idx] = current_pass;
-            current_pass_nodes.push(NodeId(idx as u32));
+            current_pass_nodes.push(node_id(idx));
         }
 
         if current_pass_nodes.is_empty() {
@@ -277,11 +282,11 @@ fn assign_targets_ping_pong(
                         source
                     } else {
                         // Otherwise add a blit task.
-                        let blit_id = NodeId(nodes.len() as u32);
+                        let blit_id = node_id(nodes.len());
                         let size = nodes[dep].size;
                         nodes.push(Node {
                             name: format!("blit({:?})", dep),
-                            dependencies: vec![NodeId(dep as u32)],
+                            dependencies: vec![node_id(dep)],
                             size
                         });
                         node_redirects.push(None);
@@ -304,7 +309,7 @@ fn it_works() {
     let mut graph = Graph::new();
 
     let n0 = graph.add_node("n0", size2(100, 100), &[]);
-    let _ = graph.add_node("n0", size2(100, 100), &[n0]);
+    let _ = graph.add_node("n00", size2(100, 100), &[n0]);
     let n1 = graph.add_node("n1", size2(100, 100), &[]);
     let n2 = graph.add_node("n2", size2(100, 100), &[]);
     let n3 = graph.add_node("n3", size2(100, 100), &[n1, n2]);
