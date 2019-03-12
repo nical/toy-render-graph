@@ -1,4 +1,5 @@
 pub mod misc;
+pub mod texture_allocator;
 
 pub use std::i32;
 use crate::misc::*;
@@ -49,7 +50,7 @@ pub struct BuiltGraph {
 
 pub struct Pass {
     pub nodes: Vec<NodeId>,
-    pub target: TargetId,
+    pub target: TextureId,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
@@ -165,7 +166,7 @@ fn create_passes_simple(
     node_passes: &mut [i32],
 ) {
 
-    passes.push(Pass { nodes: Vec::new(), target: TargetId(0) });
+    passes.push(Pass { nodes: Vec::new(), target: TextureId(0) });
 
     for idx in 0..nodes.len() {
         if !active_nodes[idx] {
@@ -182,7 +183,7 @@ fn create_passes_simple(
         if dependent_pass == passes.len() as i32 - 1 {
             passes.push(Pass {
                 nodes: Vec::new(),
-                target: target_id(passes.len()),
+                target: texture_id(passes.len()),
             });
         }
 
@@ -234,7 +235,7 @@ fn create_passes_eager(
 
         passes.push(Pass {
             nodes: current_pass_nodes,
-            target: TargetId(current_pass as u32),
+            target: TextureId(current_pass as u32),
         });
     }
 }
@@ -251,7 +252,7 @@ fn assign_targets_ping_pong(
     let mut node_redirects = vec![None; nodes.len()];
 
     for p in 0..passes.len() {
-        let target = target_id(p % 2);
+        let target = texture_id(p % 2);
         passes[p].target = target;
         for nth_node in 0..passes[p].nodes.len() {
             let n = passes[p].nodes[nth_node].to_usize();
