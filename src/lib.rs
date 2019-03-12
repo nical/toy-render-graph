@@ -53,10 +53,10 @@ pub struct Pass {
     pub target: TextureId,
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Copy, Clone,Debug, PartialEq, Eq, Hash)]
 pub struct AllocatedRect {
-    pub alloc_id: AllocId,
-    pub rect: DeviceIntBox2D
+    pub rect: DeviceIntRect,
+    pub texture: TextureId,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
@@ -100,6 +100,7 @@ impl GraphBuilder {
             &mut passes,
             &mut graph.nodes,
             &mut node_passes,
+            allocator,
         );
 
         let mut allocated_rects = vec![None; graph.nodes.len()];
@@ -183,7 +184,7 @@ fn create_passes_simple(
         if dependent_pass == passes.len() as i32 - 1 {
             passes.push(Pass {
                 nodes: Vec::new(),
-                target: texture_id(passes.len()),
+                target: texture_id(0),
             });
         }
 
@@ -247,12 +248,18 @@ fn create_passes_eager(
 fn assign_targets_ping_pong(
     passes: &mut[Pass],
     nodes: &mut Vec<Node>,
-    node_passes: &mut [i32]
+    node_passes: &mut [i32],
+    allocator: &mut dyn AtlasAllocator,
 ) {
     let mut node_redirects = vec![None; nodes.len()];
 
+    let texture_ids = [
+        allocator.add_texture(size2(2048, 2048)),
+        allocator.add_texture(size2(2048, 2048)),
+    ];
+
     for p in 0..passes.len() {
-        let target = texture_id(p % 2);
+        let target = texture_ids[p % 2];
         passes[p].target = target;
         for nth_node in 0..passes[p].nodes.len() {
             let n = passes[p].nodes[nth_node].to_usize();
@@ -329,18 +336,26 @@ fn allocate_target_rects(
 
     // In the second step we go through each pass in order and perform allocations/deallocations.
     for (pass_index, pass) in passes.iter().enumerate() {
+        allocator.flush_deallocations(pass.target);
         // Allocations needed for this pass.
         for &node in &pass.nodes {
             let node_idx = node.to_usize();
             let size = graph.nodes[node_idx].size;
-            allocated_rects[node_idx] = Some(allocator.allocate(pass.target, size));
+            allocated_rects[node_idx] = Some(AllocatedRect {
+                rect: allocator.allocate(pass.target, size),
+                texture: pass.target,
+            });
         }
 
         // Deallocations we can perform after this pass.
         let finished_range = pass_last_node_ranges[pass_index].clone();
         for finished_node in &last_node_refs[finished_range] {
             let node_idx = finished_node.to_usize();
-            allocator.deallocate(allocated_rects[node_idx].unwrap().alloc_id);
+            let allocated_rect = allocated_rects[node_idx].unwrap();
+            allocator.deallocate(
+                allocated_rect.texture,
+                &allocated_rect.rect,
+            );
         }
     }
 }
@@ -364,7 +379,7 @@ fn it_works() {
 
     for &pass_generator in &[PassGenerator::Simple, PassGenerator::Eager] {
         let mut builder = GraphBuilder::new(pass_generator);
-        let built_graph = builder.build(graph.clone(), &mut DummyAtlasAllocator::new());
+        let built_graph = builder.build(graph.clone(), &mut GuillotineAllocator::new());
 
         println!("\n------------- {:?}", pass_generator);
         for i in 0..built_graph.passes.len() {

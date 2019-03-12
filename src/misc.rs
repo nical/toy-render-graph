@@ -1,7 +1,7 @@
 use std::usize;
 use std::i32;
-
-use crate::AllocatedRect;
+use std::collections::HashMap;
+use crate::texture_allocator::*;
 
 #[repr(transparent)]
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
@@ -29,32 +29,73 @@ pub(crate) fn texture_id(idx: usize) -> TextureId {
     TextureId(idx as u32)
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
-pub struct AllocId(TextureId, u32);
-
 pub trait AtlasAllocator {
-    fn allocate(&mut self, target: TextureId, size: DeviceIntSize) -> AllocatedRect;
-    fn deallocate(&mut self, id: AllocId);
+    fn add_texture(&mut self, size: DeviceIntSize) -> TextureId;
+    fn allocate(&mut self, tex: TextureId, size: DeviceIntSize) -> DeviceIntRect;
+    fn deallocate(&mut self, tex: TextureId, rect: &DeviceIntRect);
+    fn flush_deallocations(&mut self, _texture_id: TextureId) {}
 }
 
-pub struct DummyAtlasAllocator { n: u32 }
+pub struct DummyAtlasAllocator {
+    tex: u32,
+}
 
 impl DummyAtlasAllocator {
     pub fn new() -> Self {
-        DummyAtlasAllocator { n: 0 }
+        DummyAtlasAllocator { tex: 0 }
     }
 }
 
 impl AtlasAllocator for DummyAtlasAllocator {
-    fn allocate(&mut self, target: TextureId, _size: DeviceIntSize) -> AllocatedRect {
-        self.n += 1;
-        AllocatedRect {
-            alloc_id: AllocId(target, self.n),
-            rect: DeviceIntBox2D::zero()
+    fn add_texture(&mut self, size: DeviceIntSize) -> TextureId {
+        let id = self.tex;
+        self.tex += 1;
+        TextureId(id)
+    }
+
+    fn allocate(&mut self, texture_id: TextureId, _size: DeviceIntSize) -> DeviceIntRect {
+        assert!(texture_id.0 < self.tex);
+        DeviceIntRect::zero()
+    }
+
+    fn deallocate(&mut self, texture_id: TextureId, _rect: &DeviceIntRect) {
+        assert!(texture_id.0 < self.tex);
+    }
+}
+
+pub struct GuillotineAllocator {
+    textures: Vec<TexturePage>,
+}
+
+impl GuillotineAllocator {
+    pub fn new() -> Self {
+        GuillotineAllocator {
+            textures: Vec::new(),
+        }
+    }
+}
+
+impl AtlasAllocator for GuillotineAllocator {
+
+    fn add_texture(&mut self, size: DeviceIntSize) -> TextureId {
+        self.textures.push(TexturePage::new(size));
+        texture_id(self.textures.len() - 1)
+    }
+
+    fn allocate(&mut self, texture_id: TextureId, size: DeviceIntSize) -> DeviceIntRect {
+        DeviceIntRect {
+            origin: self.textures[texture_id.to_usize()].allocate(&size).unwrap(),
+            size,
         }
     }
 
-    fn deallocate(&mut self, _id: AllocId) {}
+    fn deallocate(&mut self, texture_id: TextureId, rect: &DeviceIntRect) {
+        self.textures[texture_id.to_usize()].free(&rect);
+    }
+
+    fn flush_deallocations(&mut self, texture_id: TextureId) {
+        self.textures[texture_id.to_usize()].coalesce();
+    }
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
@@ -107,6 +148,13 @@ pub struct DeviceIntRect {
 impl DeviceIntRect {
     pub fn new(origin: DeviceIntPoint, size: DeviceIntSize) -> Self {
         Self { origin, size }
+    }
+
+    pub fn zero() -> Self {
+        Self {
+            origin: DeviceIntPoint { x: 0, y: 0 },
+            size: size2(0, 0),
+        }
     }
 
     pub fn min_x(&self) -> i32 { self.origin.x }
