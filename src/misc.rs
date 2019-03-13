@@ -1,6 +1,5 @@
 use std::usize;
 use std::i32;
-use std::collections::HashMap;
 use crate::texture_allocator::*;
 
 #[repr(transparent)]
@@ -47,7 +46,7 @@ impl DummyAtlasAllocator {
 }
 
 impl AtlasAllocator for DummyAtlasAllocator {
-    fn add_texture(&mut self, size: DeviceIntSize) -> TextureId {
+    fn add_texture(&mut self, _size: DeviceIntSize) -> TextureId {
         let id = self.tex;
         self.tex += 1;
         TextureId(id)

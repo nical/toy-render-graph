@@ -60,35 +60,72 @@ pub struct AllocatedRect {
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
-pub enum PassGenerator {
-    Simple,
+pub enum PassOptions {
+    Linear,
     Eager,
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub enum TargetOptions {
+    Direct,
+    PingPong,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub struct BuilderOptions {
+    pub passes: PassOptions,
+    pub targets: TargetOptions,
+    pub culling: bool,
+}
+
 pub struct GraphBuilder {
-    pass_gen: PassGenerator,
+    options: BuilderOptions,
 }
 
 impl GraphBuilder {
-    pub fn new(pass_gen: PassGenerator) -> Self {
-        GraphBuilder { pass_gen }
+    pub fn new(options: BuilderOptions) -> Self {
+        GraphBuilder { options }
     }
 
     pub fn build(&mut self, mut graph: Graph, allocator: &mut dyn AtlasAllocator) -> BuiltGraph {
+
+        // Step 1 - Sort the nodes in a valid execution order (nodes appear after
+        // the nodes they depend on.
+        //
+        // We don't have to do anything here because this property is provided
+        // by construction in the Graph data structure.
+        // The next step depends on this property.
+
+        // Step 2 - Mark nodes that contribute to the result of the root nodes
+        // as active.
+        //
+        // This pass is not strictly necessary, but, it prevents nodes that don't
+        // contrbute to the result of the root nodes from being executed.
+
         let mut active_nodes = Vec::new();
-        cull_nodes(&graph, &mut active_nodes);
+        if self.options.culling {
+            cull_nodes(&graph, &mut active_nodes);
+        } else {
+            active_nodes = vec![true; graph.nodes.len()];
+        }
 
         let mut passes = Vec::new();
         let mut node_passes = vec![i32::MAX; graph.nodes.len()];
 
-        match self.pass_gen {
-            PassGenerator::Eager => create_passes_eager(
+
+        // Step 3 - Assign nodes to passes.
+        //
+        // The main constraint is that nodes must be in a later pass than
+        // all of their dependencies.
+
+        match self.options.passes {
+            PassOptions::Eager => create_passes_eager(
                 &graph.nodes,
                 &mut active_nodes,
                 &mut passes,
                 &mut node_passes,
             ),
-            PassGenerator::Simple => create_passes_simple(
+            PassOptions::Linear => create_passes_linear(
                 &graph.nodes,
                 &active_nodes,
                 &mut passes,
@@ -96,12 +133,30 @@ impl GraphBuilder {
             ),
         }
 
-        assign_targets_ping_pong(
-            &mut passes,
-            &mut graph.nodes,
-            &mut node_passes,
-            allocator,
-        );
+        // Step 4 - assign render targets to passes.
+        //
+        // A render target can be used by several passes as long as no pass
+        // both read and write the same render target.
+
+        match self.options.targets {
+            TargetOptions::Direct => assign_targets_direct(
+                &mut passes,
+                &mut graph.nodes,
+                &mut node_passes,
+                allocator,
+            ),
+            TargetOptions::PingPong => assign_targets_ping_pong(
+                &mut passes,
+                &mut graph.nodes,
+                &mut node_passes,
+                allocator,
+            ),
+        }
+
+        // Step 5 - Allocate sub-rects of the render targets for each node.
+        //
+        // Several nodes can alias parts of a render target as long no node
+        // overwite the result of a node that will be needed later.
 
         let mut allocated_rects = vec![None; graph.nodes.len()];
         reset(&mut active_nodes, graph.nodes.len(), false);
@@ -156,11 +211,14 @@ fn cull_nodes(graph: &Graph, active_nodes: &mut Vec<bool>) {
 
 /// Create render passes and assign the nodes to them.
 ///
+/// new render passes are added each time a node is encountered that depends
+/// on the last added target. As a result the number of passes is sensible to
+/// the order of the nodes.
 /// This method may not generate the minimal number of render passes.
 ///
 /// This method assumes that nodes are already sorted in a valid execution order: nodes can only
 /// depend on the result of nodes that appear before them in the array.
-fn create_passes_simple(
+fn create_passes_linear(
     nodes: &[Node],
     active_nodes: &[bool],
     passes: &mut Vec<Pass>,
@@ -195,7 +253,15 @@ fn create_passes_simple(
 
 /// Create render passes and assign the nodes to them.
 ///
-/// This method generates the minimal amount of render passes.
+/// This algorithm looks at all of the nodes, finds the ones that can be executed
+/// (all dependencies are resolved in a previous pass) and adds them to the current
+/// pass. When no more nodes can be added to the pass, a new pass is created and
+/// we start again.
+/// In practice this means nodes are executed eagerly as soon as possible even if
+/// Their result is not needed in the next pass.
+///
+/// This method generates the minimal amount of render passes but is more expensive.
+/// than create_passes_linear.
 ///
 /// This method assumes that nodes are already sorted in a valid execution order: nodes can only
 /// depend on the result of nodes that appear before them in the array.
@@ -241,10 +307,11 @@ fn create_passes_eager(
     }
 }
 
-/// Assign a render target to each pass with a "ping-pong" scheme using only two render targets.
+/// Assign a render target to each pass with a "ping-pong" scheme alternating between
+/// two render targets.
 ///
-/// In order to ensure that a node never reads and writes from the same target, some blit nodes
-/// may be inserted in the graph.
+/// In order to ensure that a node never reads and writes from the same target, some
+/// blit nodes may be inserted in the graph.
 fn assign_targets_ping_pong(
     passes: &mut[Pass],
     nodes: &mut Vec<Node>,
@@ -294,6 +361,48 @@ fn assign_targets_ping_pong(
                 }
             }
         }
+    }
+}
+
+/// Assign a render target to each pass without adding nodes to the graph.
+///
+/// This method may generate more render targets than assign_targets_ping_pong,
+/// however it doesn't add any extra copying operations.
+fn assign_targets_direct(
+    passes: &mut[Pass],
+    nodes: &mut Vec<Node>,
+    node_passes: &mut [i32],
+    allocator: &mut dyn AtlasAllocator,
+) {
+    let mut targets = Vec::new();
+    let mut dependency_targets = std::collections::HashSet::new();
+
+    for p in 0..passes.len() {
+        dependency_targets.clear();
+        let pass = &passes[p];
+        for &pass_node in &pass.nodes {
+            for &dep in &nodes[pass_node.to_usize()].dependencies {
+                let dep_pass = node_passes[dep.to_usize()];
+                dependency_targets.insert(passes[dep_pass as usize].target);
+            }
+        }
+
+        let mut target = None;
+        for i in 0..targets.len() {
+            let target_id = targets[i];
+            if !dependency_targets.contains(&target_id) {
+                target = Some(target_id);
+                break;
+            }
+        }
+
+        let target = target.unwrap_or_else(|| {
+            let id = allocator.add_texture(size2(2048, 2048));
+            targets.push(id);
+            id
+        });
+
+        passes[p].target = target;
     }
 }
 
@@ -377,15 +486,23 @@ fn it_works() {
     graph.add_root(n7);
     graph.add_root(n4);
 
-    for &pass_generator in &[PassGenerator::Simple, PassGenerator::Eager] {
-        let mut builder = GraphBuilder::new(pass_generator);
-        let built_graph = builder.build(graph.clone(), &mut GuillotineAllocator::new());
+    for &culling_option in &[false, true] {
+        for &pass_option in &[PassOptions::Linear, PassOptions::Eager] {
+            for &target_option in &[TargetOptions::Direct, TargetOptions::PingPong] {
+                let mut builder = GraphBuilder::new(BuilderOptions {
+                    passes: pass_option,
+                    targets: target_option,
+                    culling: culling_option,
+                });
+                let built_graph = builder.build(graph.clone(), &mut GuillotineAllocator::new());
 
-        println!("\n------------- {:?}", pass_generator);
-        for i in 0..built_graph.passes.len() {
-            println!("# pass {:?} target {:?}", i, built_graph.passes[i].target);
-            for &node in &built_graph.passes[i].nodes {
-                println!("- node {:?} ({:?})", built_graph.nodes[node.to_usize()].name, node);
+                println!("\n------------- culling: {:?}, passes: {:?}, targets: {:?}", culling_option, pass_option, target_option);
+                for i in 0..built_graph.passes.len() {
+                    println!("# pass {:?} target {:?}", i, built_graph.passes[i].target);
+                    for &node in &built_graph.passes[i].nodes {
+                        println!("  - node {:?} ({:?})", built_graph.nodes[node.to_usize()].name, node);
+                    }
+                }
             }
         }
     }
