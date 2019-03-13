@@ -320,6 +320,7 @@ fn assign_targets_ping_pong(
 ) {
     let mut node_redirects = vec![None; nodes.len()];
 
+    // TODO: Figure out a strategy for target sizes.
     let texture_ids = [
         allocator.add_texture(size2(2048, 2048)),
         allocator.add_texture(size2(2048, 2048)),
@@ -406,6 +407,11 @@ fn assign_targets_direct(
     }
 }
 
+/// Determine when is the first and last time that the sub-rect associated to the
+/// result of each node is needed and allocate portions of the render targets
+/// accordingly.
+/// This method computes the lifetime of each node and delegates the allocation
+/// logic to the AtlasAllocator implementation.
 fn allocate_target_rects(
     graph: &Graph,
     passes: &[Pass],
@@ -469,8 +475,41 @@ fn allocate_target_rects(
     }
 }
 
+pub fn build_and_print_graph(graph: &Graph, options: BuilderOptions) {
+    let mut builder = GraphBuilder::new(options);
+    let mut allocator = GuillotineAllocator::new();
+
+    let built_graph = builder.build(graph.clone(), &mut allocator);
+
+    let n_passes = built_graph.passes.len();
+    let mut n_nodes = 0;
+    for pass in &built_graph.passes {
+        n_nodes += pass.nodes.len();
+    }
+
+    println!(
+        "\n------------- culling: {:?}, passes: {:?}, targets: {:?}",
+        options.culling,
+        options.passes,
+        options.targets
+    );
+    println!(
+        "              {:?} nodes, {:?} passes, {:?} targets",
+        n_nodes,
+        n_passes,
+        allocator.textures.len(),
+    );
+
+    for i in 0..built_graph.passes.len() {
+        println!("# pass {:?} target {:?}", i, built_graph.passes[i].target);
+        for &node in &built_graph.passes[i].nodes {
+            println!("  - {:?} {:?}", node, built_graph.nodes[node.to_usize()].name);
+        }
+    }
+}
+
 #[test]
-fn it_works() {
+fn simple_graph() {
     let mut graph = Graph::new();
 
     let n0 = graph.add_node("n0", size2(100, 100), &[]);
@@ -489,20 +528,14 @@ fn it_works() {
     for &culling_option in &[false, true] {
         for &pass_option in &[PassOptions::Linear, PassOptions::Eager] {
             for &target_option in &[TargetOptions::Direct, TargetOptions::PingPong] {
-                let mut builder = GraphBuilder::new(BuilderOptions {
-                    passes: pass_option,
-                    targets: target_option,
-                    culling: culling_option,
-                });
-                let built_graph = builder.build(graph.clone(), &mut GuillotineAllocator::new());
-
-                println!("\n------------- culling: {:?}, passes: {:?}, targets: {:?}", culling_option, pass_option, target_option);
-                for i in 0..built_graph.passes.len() {
-                    println!("# pass {:?} target {:?}", i, built_graph.passes[i].target);
-                    for &node in &built_graph.passes[i].nodes {
-                        println!("  - node {:?} ({:?})", built_graph.nodes[node.to_usize()].name, node);
-                    }
-                }
+                build_and_print_graph(
+                    &graph,
+                    BuilderOptions {
+                        passes: pass_option,
+                        targets: target_option,
+                        culling: culling_option,
+                    },
+                )
             }
         }
     }

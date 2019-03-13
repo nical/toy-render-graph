@@ -63,7 +63,7 @@ impl AtlasAllocator for DummyAtlasAllocator {
 }
 
 pub struct GuillotineAllocator {
-    textures: Vec<TexturePage>,
+    pub textures: Vec<TexturePage>,
 }
 
 impl GuillotineAllocator {
