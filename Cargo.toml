@@ -5,3 +5,4 @@ authors = ["Nicolas Silva <nical@fastmail.com>"]
 edition = "2018"
 
 [dependencies]
+euclid = "0.19.5"

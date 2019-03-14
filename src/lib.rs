@@ -4,6 +4,12 @@ pub mod texture_allocator;
 pub use std::i32;
 use crate::misc::*;
 
+pub struct DeviceSpace;
+pub type DeviceIntRect = euclid::TypedRect<i32, DeviceSpace>;
+pub type DeviceIntPoint = euclid::TypedPoint2D<i32, DeviceSpace>;
+pub type DeviceIntSize = euclid::TypedSize2D<i32, DeviceSpace>;
+pub use euclid::size2;
+
 #[derive(Clone)]
 pub struct Node {
     pub name: String,

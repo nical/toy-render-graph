@@ -3,7 +3,7 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 use std::slice::Iter;
-use crate::misc::*;
+use crate::{DeviceIntPoint, DeviceIntRect, DeviceIntSize};
 
 pub fn rect_is_empty(rect: &DeviceIntRect) -> bool {
     rect.size.width == 0 || rect.size.height == 0
@@ -113,7 +113,7 @@ impl TexturePage {
         // that results in the single largest area (Min Area Split Rule, MINAS).
         let chosen_rect = self.free_list.remove(index);
         let candidate_free_rect_to_right = DeviceIntRect {
-            origin: DeviceIntPoint { x: chosen_rect.origin.x + requested_dimensions.width, y: chosen_rect.origin.y },
+            origin: DeviceIntPoint::new(chosen_rect.origin.x + requested_dimensions.width, chosen_rect.origin.y),
             size: DeviceIntSize::new(chosen_rect.size.width - requested_dimensions.width, requested_dimensions.height)
         };
         let candidate_free_rect_to_bottom =
@@ -267,7 +267,7 @@ impl TexturePage {
 
     pub fn clear(&mut self) {
         self.free_list = FreeRectList::new();
-        self.free_list.push(&DeviceIntRect::new(DeviceIntPoint { x: 0, y: 0 }, self.texture_size));
+        self.free_list.push(&DeviceIntRect::new(DeviceIntPoint::zero(), self.texture_size));
         self.allocations = 0;
         self.dirty = false;
     }
