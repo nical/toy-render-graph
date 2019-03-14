@@ -10,7 +10,7 @@ pub type DeviceIntPoint = euclid::TypedPoint2D<i32, DeviceSpace>;
 pub type DeviceIntSize = euclid::TypedSize2D<i32, DeviceSpace>;
 pub use euclid::size2;
 
-pub use crate::misc::{AtlasAllocator, DummyAtlasAllocator, GuillotineAllocator};
+pub use crate::misc::{AtlasAllocator, DummyAtlasAllocator, GuillotineAllocator, DbgAtlasAllocator};
 
 #[derive(Clone)]
 pub struct Node {
@@ -61,7 +61,7 @@ pub struct Pass {
     pub target: TextureId,
 }
 
-#[derive(Copy, Clone,Debug, PartialEq, Eq, Hash)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct AllocatedRect {
     pub rect: DeviceIntRect,
     pub texture: TextureId,
@@ -459,7 +459,7 @@ fn allocate_target_rects(
 
     // In the second step we go through each pass in order and perform allocations/deallocations.
     for (pass_index, pass) in passes.iter().enumerate() {
-        allocator.flush_deallocations(pass.target);
+        allocator.begin_pass(pass.target);
         // Allocations needed for this pass.
         for &node in &pass.nodes {
             let node_idx = node.to_usize();
@@ -483,9 +483,11 @@ fn allocate_target_rects(
     }
 }
 
-pub fn build_and_print_graph(graph: &Graph, options: BuilderOptions) {
+pub fn build_and_print_graph(graph: &Graph, options: BuilderOptions, with_deallocations: bool) {
     let mut builder = GraphBuilder::new(options);
     let mut allocator = GuillotineAllocator::new();
+    let mut allocator = DbgAtlasAllocator::new(&mut allocator);
+    allocator.record_deallocations = with_deallocations;
 
     let built_graph = builder.build(graph.clone(), &mut allocator);
 
@@ -496,22 +498,33 @@ pub fn build_and_print_graph(graph: &Graph, options: BuilderOptions) {
     }
 
     println!(
-        "\n------------- culling: {:?}, passes: {:?}, targets: {:?}",
+        "\n------------- deallocations: {:?}, culling: {:?}, passes: {:?}, targets: {:?}",
+        with_deallocations,
         options.culling,
         options.passes,
         options.targets
     );
     println!(
-        "              {:?} nodes, {:?} passes, {:?} targets",
+        "              {:?} nodes, {:?} passes, {:?} targets, {:?} pixels (max), {:?} rects (max)",
         n_nodes,
         n_passes,
         allocator.textures.len(),
+        allocator.max_allocated_pixels(),
+        allocator.max_allocated_rects(),
     );
 
     for i in 0..built_graph.passes.len() {
         println!("# pass {:?} target {:?}", i, built_graph.passes[i].target);
         for &node in &built_graph.passes[i].nodes {
-            println!("  - {:?} {:?}", node, built_graph.nodes[node.to_usize()].name);
+            println!("  - {:?} {:?}      rect:{}",
+                node,
+                built_graph.nodes[node.to_usize()].name,
+                if let Some(r) = built_graph.allocated_rects[node.to_usize()] {
+                    format!("[({}, {}) {}x{}]", r.rect.origin.x, r.rect.origin.y, r.rect.size.width, r.rect.size.height)
+                } else {
+                    "".to_string()
+                },
+            );
         }
     }
 }
@@ -527,13 +540,13 @@ fn simple_graph() {
     let n3 = graph.add_node("n3", size2(100, 100), &[n1, n2]);
     let n4 = graph.add_node("n4", size2(100, 100), &[]);
     let n5 = graph.add_node("n5", size2(100, 100), &[n2, n4]);
-    let n6 = graph.add_node("n6", size2(100, 100), &[n1, n2, n3, n4, n5]);
+    let n6 = graph.add_node("n6", size2(100, 100), &[n1, n3, n5]);
     let n7 = graph.add_node("root", size2(800, 600), &[n6]);
 
-    graph.add_root(n7);
     graph.add_root(n4);
+    graph.add_root(n7);
 
-    for &culling_option in &[false, true] {
+    for &with_deallocations in &[false, true] {
         for &pass_option in &[PassOptions::Linear, PassOptions::Eager] {
             for &target_option in &[TargetOptions::Direct, TargetOptions::PingPong] {
                 build_and_print_graph(
@@ -541,8 +554,9 @@ fn simple_graph() {
                     BuilderOptions {
                         passes: pass_option,
                         targets: target_option,
-                        culling: culling_option,
+                        culling: true,
                     },
+                    with_deallocations,
                 )
             }
         }

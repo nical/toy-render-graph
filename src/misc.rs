@@ -1,4 +1,5 @@
 use std::usize;
+use std::collections::HashSet;
 use crate::texture_allocator::*;
 use crate::{DeviceIntSize, DeviceIntRect};
 
@@ -32,7 +33,7 @@ pub trait AtlasAllocator {
     fn add_texture(&mut self, size: DeviceIntSize) -> TextureId;
     fn allocate(&mut self, tex: TextureId, size: DeviceIntSize) -> DeviceIntRect;
     fn deallocate(&mut self, tex: TextureId, rect: &DeviceIntRect);
-    fn flush_deallocations(&mut self, _texture_id: TextureId) {}
+    fn begin_pass(&mut self, _texture_id: TextureId) {}
 }
 
 pub struct DummyAtlasAllocator {
@@ -92,9 +93,69 @@ impl AtlasAllocator for GuillotineAllocator {
         self.textures[texture_id.to_usize()].free(&rect);
     }
 
-    fn flush_deallocations(&mut self, texture_id: TextureId) {
+    fn begin_pass(&mut self, texture_id: TextureId) {
         self.textures[texture_id.to_usize()].coalesce();
     }
 }
 
+pub struct DbgAtlasAllocator<'l> {
+    pub allocator: &'l mut dyn AtlasAllocator,
+    pub textures: Vec<HashSet<DeviceIntRect>>,
+    pub max_pixels: i32,
+    pub max_rects: usize,
+    pub record_deallocations: bool,
+}
 
+impl<'l> DbgAtlasAllocator<'l> {
+    pub fn new(allocator: &'l mut dyn AtlasAllocator) -> Self {
+        DbgAtlasAllocator {
+            allocator,
+            textures: Vec::new(),
+            max_pixels: 0,
+            max_rects: 0,
+            record_deallocations: true,
+        }
+    }
+
+    pub fn max_allocated_pixels(&self) -> i32 { self.max_pixels }
+
+    pub fn max_allocated_rects(&self) -> usize { self.max_rects }
+}
+
+impl<'l> AtlasAllocator for DbgAtlasAllocator<'l> {
+    fn add_texture(&mut self, size: DeviceIntSize) -> TextureId {
+        self.textures.push(HashSet::new());
+        self.allocator.add_texture(size)
+    }
+
+    fn allocate(&mut self, texture_id: TextureId, size: DeviceIntSize) -> DeviceIntRect {
+        let rect = self.allocator.allocate(texture_id, size);
+
+        self.textures[texture_id.to_usize()].insert(rect);
+
+        let mut pixels = 0;
+        let mut rects = 0;
+        for tex in &self.textures {
+            rects += tex.len();
+            for rect in tex {
+                pixels += rect.area();
+            }
+        }
+
+        self.max_pixels = std::cmp::max(self.max_pixels, pixels);
+        self.max_rects = std::cmp::max(self.max_rects, rects);
+
+        rect
+    }
+
+    fn deallocate(&mut self, texture_id: TextureId, rect: &DeviceIntRect) {
+        if self.record_deallocations {
+            self.textures[texture_id.to_usize()].remove(&rect);
+            self.allocator.deallocate(texture_id, rect);
+        }
+    }
+
+    fn begin_pass(&mut self, texture_id: TextureId) {
+        self.allocator.begin_pass(texture_id);
+    }
+}
