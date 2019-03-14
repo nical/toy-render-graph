@@ -10,6 +10,8 @@ pub type DeviceIntPoint = euclid::TypedPoint2D<i32, DeviceSpace>;
 pub type DeviceIntSize = euclid::TypedSize2D<i32, DeviceSpace>;
 pub use euclid::size2;
 
+pub use crate::misc::{AtlasAllocator, DummyAtlasAllocator, GuillotineAllocator};
+
 #[derive(Clone)]
 pub struct Node {
     pub name: String,

@@ -6,3 +6,10 @@ edition = "2018"
 
 [dependencies]
 euclid = "0.19.5"
+
+[dev-dependencies]
+criterion = "0.2"
+
+[[bench]]
+name = "cpu_time"
+harness = false
