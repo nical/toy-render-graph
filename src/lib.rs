@@ -79,6 +79,7 @@ pub struct AllocatedRect {
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum PassOptions {
     Linear,
+    Recursive,
     Eager,
 }
 
@@ -145,6 +146,12 @@ impl GraphBuilder {
             PassOptions::Linear => create_passes_linear(
                 &graph.nodes,
                 &active_nodes,
+                &mut passes,
+                &mut node_passes,
+            ),
+            PassOptions::Recursive => create_passes_recursive(
+                &graph,
+                &mut active_nodes,
                 &mut passes,
                 &mut node_passes,
             ),
@@ -290,6 +297,76 @@ fn create_passes_linear(
             target,
             fixed_target,
         });
+    }
+}
+
+/// Create render passes and assign the nodes to them.
+///
+/// This method tries to emulate WebRender's current behavior.
+/// Nodes are executed as late as possible (as opposed to create_passes_eager
+/// which tends to execute nodes as early as possible).
+///
+/// TODO: Support fixed target allocations.
+fn create_passes_recursive(
+    graph: &Graph,
+    active_nodes: &[bool],
+    passes: &mut Vec<Pass>,
+    node_passes: &mut [i32],
+) {
+    fn create_passes_recursive_impl(
+        node_id: NodeId,
+        rev_pass_index: usize,
+        nodes: &[Node],
+        node_rev_passes: &mut [usize],
+        max_depth: &mut usize,
+    ) {
+        *max_depth = std::cmp::max(*max_depth, rev_pass_index);
+
+        node_rev_passes[node_id.to_usize()] = std::cmp::max(
+            node_rev_passes[node_id.to_usize()],
+            rev_pass_index,
+        );
+
+        let node = &nodes[node_id.to_usize()];
+        for &dep in &node.dependencies {
+            create_passes_recursive_impl(
+                dep,
+                rev_pass_index + 1,
+                nodes,
+                node_rev_passes,
+                max_depth,
+            );
+        }
+    }
+
+    let mut max_depth = 0;
+    let mut node_rev_passes = vec![0; graph.nodes.len()];
+
+    for &root in &graph.roots {
+        create_passes_recursive_impl(
+            root,
+            0,
+            &graph.nodes,
+            &mut node_rev_passes,
+            &mut max_depth,
+        );
+    }
+
+    for _ in 0..(max_depth + 1) {
+        passes.push(Pass {
+            nodes: Vec::new(),
+            target: texture_id(0),
+            fixed_target: false,
+        });
+    }
+
+    for node_idx in 0..graph.nodes.len() {
+        if !active_nodes[node_idx] {
+            continue;
+        }
+        let pass_index = max_depth - node_rev_passes[node_idx];
+        passes[pass_index].nodes.push(node_id(node_idx));
+        node_passes[node_idx] = pass_index as i32;
     }
 }
 
@@ -628,7 +705,7 @@ fn simple_graph() {
     graph.add_root(n8);
 
     for &with_deallocations in &[false, true] {
-        for &pass_option in &[PassOptions::Linear, PassOptions::Eager] {
+        for &pass_option in &[PassOptions::Linear, PassOptions::Recursive, PassOptions::Eager] {
             for &target_option in &[TargetOptions::Direct, TargetOptions::PingPong] {
                 build_and_print_graph(
                     &graph,
