@@ -704,6 +704,49 @@ fn simple_graph() {
     graph.add_root(n5);
     graph.add_root(n8);
 
+    for &with_deallocations in &[true] {
+        for &pass_option in &[PassOptions::Linear, PassOptions::Recursive, PassOptions::Eager] {
+            for &target_option in &[TargetOptions::Direct, TargetOptions::PingPong] {
+                build_and_print_graph(
+                    &graph,
+                    BuilderOptions {
+                        passes: pass_option,
+                        targets: target_option,
+                        culling: true,
+                    },
+                    with_deallocations,
+                )
+            }
+        }
+    }
+}
+
+#[test]
+fn test_stacked_shadows() {
+    let mut graph = Graph::new();
+
+    let pic1 = graph.add_node("picture1", size2(400, 200), AllocKind::Dynamic, &[]);
+    let ds1 = graph.add_node("downscale1", size2(200, 100), AllocKind::Dynamic, &[pic1]);
+    let ds2 = graph.add_node("downscale2", size2(100, 50), AllocKind::Dynamic, &[ds1]);
+    let vblur1 = graph.add_node("vblur1", size2(400, 300), AllocKind::Dynamic, &[ds2]);
+    let hblur1 = graph.add_node("hblur1", size2(500, 300), AllocKind::Dynamic, &[vblur1]);
+
+    let vblur2 = graph.add_node("vblur2", size2(400, 350), AllocKind::Dynamic, &[ds2]);
+    let hblur2 = graph.add_node("hblur2", size2(550, 350), AllocKind::Dynamic, &[vblur2]);
+
+    let vblur3 = graph.add_node("vblur3", size2(100, 100), AllocKind::Dynamic, &[ds1]);
+    let hblur3 = graph.add_node("hblur3", size2(100, 100), AllocKind::Dynamic, &[vblur3]);
+
+    let ds3 = graph.add_node("downscale3", size2(100, 50), AllocKind::Dynamic, &[ds2]);
+    let vblur4 = graph.add_node("vblur3", size2(500, 400), AllocKind::Dynamic, &[ds3]);
+    let hblur4 = graph.add_node("hblur3", size2(600, 400), AllocKind::Dynamic, &[vblur4]);
+
+    let root = graph.add_node("root_pic", size2(2000, 2000),
+        AllocKind::Fixed(TextureId(123)),
+        &[hblur1, hblur2, hblur3, hblur4]
+    );
+    graph.add_root(root);
+
     for &with_deallocations in &[false, true] {
         for &pass_option in &[PassOptions::Linear, PassOptions::Recursive, PassOptions::Eager] {
             for &target_option in &[TargetOptions::Direct, TargetOptions::PingPong] {
