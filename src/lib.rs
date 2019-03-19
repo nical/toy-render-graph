@@ -664,7 +664,7 @@ fn test_stacked_shadows() {
     let vblur4 = graph.add_node("vblur3", size2(500, 400), AllocKind::Dynamic, &[ds3]);
     let hblur4 = graph.add_node("hblur3", size2(600, 400), AllocKind::Dynamic, &[vblur4]);
 
-    let root = graph.add_node("root_pic", size2(2000, 2000),
+    let root = graph.add_node("root_pic", size2(1000, 1000),
         AllocKind::Fixed(TextureId(123)),
         &[hblur1, hblur2, hblur3, hblur4]
     );
