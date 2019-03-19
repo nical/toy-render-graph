@@ -78,7 +78,6 @@ pub struct AllocatedRect {
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum PassOptions {
-    Linear,
     Recursive,
     Eager,
 }
@@ -140,12 +139,6 @@ impl GraphBuilder {
             PassOptions::Eager => create_passes_eager(
                 &graph.nodes,
                 &mut active_nodes,
-                &mut passes,
-                &mut node_passes,
-            ),
-            PassOptions::Linear => create_passes_linear(
-                &graph.nodes,
-                &active_nodes,
                 &mut passes,
                 &mut node_passes,
             ),
@@ -235,73 +228,6 @@ fn cull_nodes(graph: &Graph, active_nodes: &mut Vec<bool>) {
 
 /// Create render passes and assign the nodes to them.
 ///
-/// new render passes are added each time a node is encountered that depends
-/// on the last added target. As a result the number of passes is sensible to
-/// the order of the nodes.
-/// This method may not generate the minimal number of render passes.
-///
-/// This method assumes that nodes are already sorted in a valid execution order: nodes can only
-/// depend on the result of nodes that appear before them in the array.
-fn create_passes_linear(
-    nodes: &[Node],
-    active_nodes: &[bool],
-    passes: &mut Vec<Pass>,
-    node_passes: &mut [i32],
-) {
-    let mut current_pass_nodes = Vec::new();
-    let mut prev_alloc_kind = AllocKind::Dynamic;
-    for idx in 0..nodes.len() {
-        if !active_nodes[idx] {
-            continue;
-        }
-
-        let alloc_kind = nodes[idx].alloc_kind;
-        let push_new_pass = if prev_alloc_kind != alloc_kind {
-            true
-        } else {
-            let mut dependent_pass: i32 = -1;
-            for dep in &nodes[idx].dependencies {
-                dependent_pass = i32::max(dependent_pass, node_passes[dep.to_usize()]);
-            }
-
-            assert!(dependent_pass <= passes.len() as i32);
-
-            dependent_pass == passes.len() as i32
-        };
-
-        if push_new_pass {
-            let (target, fixed_target) = match prev_alloc_kind {
-                AllocKind::Dynamic => (texture_id(0), false),
-                AllocKind::Fixed(target) => (target, true),
-            };
-            passes.push(Pass {
-                nodes: std::mem::replace(&mut current_pass_nodes, Vec::new()),
-                target,
-                fixed_target,
-            });
-        }
-
-        prev_alloc_kind = alloc_kind;
-
-        current_pass_nodes.push(node_id(idx));
-        node_passes[idx] = passes.len() as i32;
-    }
-
-    if !current_pass_nodes.is_empty() {
-        let (target, fixed_target) = match prev_alloc_kind {
-            AllocKind::Dynamic => (texture_id(0), false),
-            AllocKind::Fixed(target) => (target, true),
-        };
-        passes.push(Pass {
-            nodes: std::mem::replace(&mut current_pass_nodes, Vec::new()),
-            target,
-            fixed_target,
-        });
-    }
-}
-
-/// Create render passes and assign the nodes to them.
-///
 /// This method tries to emulate WebRender's current behavior.
 /// Nodes are executed as late as possible (as opposed to create_passes_eager
 /// which tends to execute nodes as early as possible).
@@ -378,9 +304,6 @@ fn create_passes_recursive(
 /// we start again.
 /// In practice this means nodes are executed eagerly as soon as possible even if
 /// Their result is not needed in the next pass.
-///
-/// This method generates the minimal amount of render passes but is more expensive.
-/// than create_passes_linear.
 ///
 /// This method assumes that nodes are already sorted in a valid execution order: nodes can only
 /// depend on the result of nodes that appear before them in the array.
@@ -705,7 +628,7 @@ fn simple_graph() {
     graph.add_root(n8);
 
     for &with_deallocations in &[true] {
-        for &pass_option in &[PassOptions::Linear, PassOptions::Recursive, PassOptions::Eager] {
+        for &pass_option in &[PassOptions::Recursive, PassOptions::Eager] {
             for &target_option in &[TargetOptions::Direct, TargetOptions::PingPong] {
                 build_and_print_graph(
                     &graph,
@@ -748,7 +671,7 @@ fn test_stacked_shadows() {
     graph.add_root(root);
 
     for &with_deallocations in &[false, true] {
-        for &pass_option in &[PassOptions::Linear, PassOptions::Recursive, PassOptions::Eager] {
+        for &pass_option in &[PassOptions::Recursive, PassOptions::Eager] {
             for &target_option in &[TargetOptions::Direct, TargetOptions::PingPong] {
                 build_and_print_graph(
                     &graph,

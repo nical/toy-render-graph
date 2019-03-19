@@ -125,17 +125,6 @@ fn do_bench_no_allocator(
     );
 }
 
-fn culled_linear_pingpong_guillotine(c: &mut Criterion) {
-    do_bench(c, "culled_linear_pingpong_guillotine",
-        &graph_1,
-        BuilderOptions {
-            culling: true,
-            passes: PassOptions::Linear,
-            targets: TargetOptions::PingPong,
-        },
-    )
-}
-
 fn culled_eager_pingpong_guillotine(c: &mut Criterion) {
     do_bench(c, "culled_eager_pingpong_guillotine",
         &graph_1,
@@ -158,17 +147,6 @@ fn culled_eager_direct_guillotine(c: &mut Criterion) {
     )
 }
 
-fn culled_linear_direct_guillotine(c: &mut Criterion) {
-    do_bench(c, "culled_linera_direct_guillotine",
-        &graph_1,
-        BuilderOptions {
-            culling: true,
-            passes: PassOptions::Linear,
-            targets: TargetOptions::Direct,
-        },
-    )
-}
-
 fn culled_eager_pingpong_no_allocator(c: &mut Criterion) {
     do_bench_no_allocator(c, "culled_eager_pingpong_no_allocator",
         &graph_1,
@@ -181,9 +159,7 @@ fn culled_eager_pingpong_no_allocator(c: &mut Criterion) {
 }
 
 criterion_group!(benches,
-    culled_linear_pingpong_guillotine,
     culled_eager_pingpong_guillotine,
-    culled_linear_direct_guillotine,
     culled_eager_direct_guillotine,
     culled_eager_pingpong_no_allocator,
 );
