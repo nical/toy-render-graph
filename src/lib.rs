@@ -12,12 +12,21 @@ pub use euclid::size2;
 
 pub use crate::misc::{AtlasAllocator, DummyAtlasAllocator, GuillotineAllocator, DbgAtlasAllocator};
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum TargetKind {
+    Color = 0,
+    Alpha = 1,
+}
+
+const NUM_TARGET_KINDS: usize = 2;
+
 #[derive(Clone)]
 pub struct Node {
     pub name: String,
     pub size: DeviceIntSize,
     pub alloc_kind: AllocKind,
     pub dependencies: Vec<NodeId>,
+    pub target_kind: TargetKind,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
@@ -40,13 +49,14 @@ impl Graph {
         }
     }
 
-    pub fn add_node(&mut self, name: &str, size: DeviceIntSize, alloc_kind: AllocKind, deps: &[NodeId]) -> NodeId {
+    pub fn add_node(&mut self, name: &str, target_kind: TargetKind, size: DeviceIntSize, alloc_kind: AllocKind, deps: &[NodeId]) -> NodeId {
         let id = node_id(self.nodes.len());
         self.nodes.push(Node {
             name: name.to_string(),
             size,
             alloc_kind,
             dependencies: deps.to_vec(),
+            target_kind,
         });
 
         id
@@ -65,9 +75,13 @@ pub struct BuiltGraph {
 }
 
 pub struct Pass {
-    pub nodes: Vec<NodeId>,
-    pub target: TextureId,
+    pub targets: [PassTarget; NUM_TARGET_KINDS],
     pub fixed_target: bool,
+}
+
+pub struct PassTarget {
+    nodes: Vec<NodeId>,
+    destination: Option<TextureId>,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
@@ -79,7 +93,6 @@ pub struct AllocatedRect {
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum PassOptions {
     Recursive,
-    Eager,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
@@ -136,12 +149,6 @@ impl GraphBuilder {
         // all of their dependencies.
 
         match self.options.passes {
-            PassOptions::Eager => create_passes_eager(
-                &graph.nodes,
-                &mut active_nodes,
-                &mut passes,
-                &mut node_passes,
-            ),
             PassOptions::Recursive => create_passes_recursive(
                 &graph,
                 &mut active_nodes,
@@ -229,8 +236,7 @@ fn cull_nodes(graph: &Graph, active_nodes: &mut Vec<bool>) {
 /// Create render passes and assign the nodes to them.
 ///
 /// This method tries to emulate WebRender's current behavior.
-/// Nodes are executed as late as possible (as opposed to create_passes_eager
-/// which tends to execute nodes as early as possible).
+/// Nodes are executed as late as possible.
 ///
 /// TODO: Support fixed target allocations.
 fn create_passes_recursive(
@@ -280,8 +286,16 @@ fn create_passes_recursive(
 
     for _ in 0..(max_depth + 1) {
         passes.push(Pass {
-            nodes: Vec::new(),
-            target: texture_id(0),
+            targets: [
+                PassTarget {
+                    nodes: Vec::new(),
+                    destination: None,
+                },
+                PassTarget {
+                    nodes: Vec::new(),
+                    destination: None,
+                },
+            ],
             fixed_target: false,
         });
     }
@@ -290,86 +304,10 @@ fn create_passes_recursive(
         if !active_nodes[node_idx] {
             continue;
         }
+        let target_kind = graph.nodes[node_idx].target_kind;
         let pass_index = max_depth - node_rev_passes[node_idx];
-        passes[pass_index].nodes.push(node_id(node_idx));
+        passes[pass_index].targets[target_kind as usize].nodes.push(node_id(node_idx));
         node_passes[node_idx] = pass_index as i32;
-    }
-}
-
-/// Create render passes and assign the nodes to them.
-///
-/// This algorithm looks at all of the nodes, finds the ones that can be executed
-/// (all dependencies are resolved in a previous pass) and adds them to the current
-/// pass. When no more nodes can be added to the pass, a new pass is created and
-/// we start again.
-/// In practice this means nodes are executed eagerly as soon as possible even if
-/// Their result is not needed in the next pass.
-///
-/// This method assumes that nodes are already sorted in a valid execution order: nodes can only
-/// depend on the result of nodes that appear before them in the array.
-fn create_passes_eager(
-    nodes: &[Node],
-    active_nodes: &mut [bool],
-    passes: &mut Vec<Pass>,
-    node_passes: &mut [i32]
-) {
-    loop {
-        let current_pass = passes.len() as i32;
-        let mut current_pass_nodes = Vec::new();
-        let mut fixed_nodes = Vec::new();
-
-        'pass_loop: for idx in 0..nodes.len() {
-            if !active_nodes[idx] {
-                continue;
-            }
-
-            let mut dependent_pass: i32 = -1;
-            let node = &nodes[idx];
-            for &dep in &node.dependencies {
-                let pass = node_passes[dep.to_usize()];
-                if pass >= current_pass {
-                    continue 'pass_loop;
-                }
-                dependent_pass = i32::max(dependent_pass, pass);
-            }
-
-            if let AllocKind::Fixed(target) = node.alloc_kind {
-                // To avoid breaking passes we record the fixed allocation nodes that are
-                // ready and push them to a new pass after we are done building the current
-                // one.
-                fixed_nodes.push((idx, target));
-            } else {
-                node_passes[idx] = current_pass;
-                current_pass_nodes.push(node_id(idx));
-            }
-
-            // Mark the node inactive so that we don't attempt to add it to another
-            // pass.
-            active_nodes[idx] = false;
-        }
-
-        let new_dynamic_nodes = !current_pass_nodes.is_empty();
-        if new_dynamic_nodes {
-            passes.push(Pass {
-                nodes: current_pass_nodes,
-                target: TextureId(current_pass as u32),
-                fixed_target: false,
-            });
-        }
-
-        let new_fixed_nodes = !fixed_nodes.is_empty();
-        for &(idx, target) in &fixed_nodes {
-            node_passes[idx] = passes.len() as i32;
-            passes.push(Pass {
-                nodes: vec![node_id(idx)],
-                target,
-                fixed_target: true,
-            });
-        }
-
-        if !new_dynamic_nodes && !new_fixed_nodes {
-            break;
-        }
     }
 }
 
@@ -388,51 +326,69 @@ fn assign_targets_ping_pong(
 
     // TODO: Figure out a strategy for target sizes.
     let texture_ids = [
-        allocator.add_texture(size2(2048, 2048)),
-        allocator.add_texture(size2(2048, 2048)),
+        // color
+        [
+            allocator.add_texture(size2(2048, 2048)),
+            allocator.add_texture(size2(2048, 2048)),
+        ],
+        // alpha
+        [
+            allocator.add_texture(size2(2048, 2048)),
+            allocator.add_texture(size2(2048, 2048)),
+        ],
     ];
 
     let mut last_dynamic_pass = 0;
-    let mut nth_dynamic_pass = 0;
+    let mut nth_dynamic_pass = [0, 0];
     for p in 0..passes.len() {
         if passes[p].fixed_target {
             continue;
         }
-        let target = texture_ids[nth_dynamic_pass % 2];
-        nth_dynamic_pass += 1;
 
-        passes[p].target = target;
-        for nth_node in 0..passes[p].nodes.len() {
-            let n = passes[p].nodes[nth_node].to_usize();
-            for nth_dep in 0..nodes[n].dependencies.len() {
-                let dep = nodes[n].dependencies[nth_dep].to_usize();
-                let dep_pass = node_passes[dep] as usize;
+        for target_kind_index in 0..NUM_TARGET_KINDS {
+            if passes[p].targets[target_kind_index].nodes.is_empty() {
+                continue;
+            }
 
-                // Can't both read and write the same target.
-                if passes[dep_pass].target == target {
+            let ping_pong = nth_dynamic_pass[target_kind_index] % 2;
+            nth_dynamic_pass[target_kind_index] += 1;
 
-                    // See if we have already added a blit task to avoid the problem.
-                    let source = if let Some(source) = node_redirects[dep] {
-                        source
-                    } else {
-                        // Otherwise add a blit task.
-                        let blit_id = node_id(nodes.len());
-                        let size = nodes[dep].size;
-                        nodes.push(Node {
-                            name: format!("blit({:?})", dep),
-                            dependencies: vec![node_id(dep)],
-                            alloc_kind: AllocKind::Dynamic,
-                            size
-                        });
-                        node_redirects.push(None);
-                        node_redirects[dep] = Some(blit_id);
+            let current_destination = texture_ids[target_kind_index][ping_pong];
+            passes[p].targets[target_kind_index].destination = Some(current_destination);
 
-                        passes[last_dynamic_pass].nodes.push(blit_id);
+            for nth_node in 0..passes[p].targets[target_kind_index].nodes.len() {
+                let n = passes[p].targets[target_kind_index].nodes[nth_node].to_usize();
+                for nth_dep in 0..nodes[n].dependencies.len() {
+                    let dep = nodes[n].dependencies[nth_dep].to_usize();
+                    let dep_pass = node_passes[dep] as usize;
+                    let dep_target_kind = nodes[dep].target_kind;
+                    // Can't both read and write the same target.
+                    if passes[dep_pass].targets[dep_target_kind as usize].destination == Some(current_destination) {
 
-                        blit_id
-                    };
+                        // See if we have already added a blit task to avoid the problem.
+                        let source = if let Some(source) = node_redirects[dep] {
+                            source
+                        } else {
+                            // Otherwise add a blit task.
+                            let blit_id = node_id(nodes.len());
+                            let size = nodes[dep].size;
+                            let target_kind = nodes[dep].target_kind;
+                            nodes.push(Node {
+                                name: format!("blit({:?})", dep),
+                                dependencies: vec![node_id(dep)],
+                                alloc_kind: AllocKind::Dynamic,
+                                size,
+                                target_kind,
+                            });
+                            node_redirects[dep] = Some(blit_id);
 
-                    nodes[n].dependencies[nth_dep] = source;
+                            passes[last_dynamic_pass].targets[dep_target_kind as usize].nodes.push(blit_id);
+
+                            blit_id
+                        };
+
+                        nodes[n].dependencies[nth_dep] = source;
+                    }
                 }
             }
         }
@@ -452,8 +408,8 @@ fn assign_targets_direct(
     node_passes: &mut [i32],
     allocator: &mut dyn AtlasAllocator,
 ) {
-    let mut targets = Vec::new();
-    let mut dependency_targets = std::collections::HashSet::new();
+    let mut allocated_textures = [Vec::new(), Vec::new()];
+    let mut dependencies = std::collections::HashSet::new();
 
     for p in 0..passes.len() {
         let pass = &passes[p];
@@ -461,30 +417,40 @@ fn assign_targets_direct(
             continue;
         }
 
-        dependency_targets.clear();
-        for &pass_node in &pass.nodes {
-            for &dep in &nodes[pass_node.to_usize()].dependencies {
-                let dep_pass = node_passes[dep.to_usize()];
-                dependency_targets.insert(passes[dep_pass as usize].target);
+        dependencies.clear();
+        for target in &pass.targets {
+            for &pass_node in &target.nodes {
+                for &dep in &nodes[pass_node.to_usize()].dependencies {
+                    let dep_pass = node_passes[dep.to_usize()];
+                    let target_kind = nodes[dep.to_usize()].target_kind;
+                    if let Some(id) = passes[dep_pass as usize].targets[target_kind as usize].destination {
+                        dependencies.insert(id);
+                    }
+                }
             }
         }
 
-        let mut target = None;
-        for i in 0..targets.len() {
-            let target_id = targets[i];
-            if !dependency_targets.contains(&target_id) {
-                target = Some(target_id);
-                break;
+        for target_kind in 0..NUM_TARGET_KINDS {
+            if passes[p].targets[target_kind].nodes.is_empty() {
+                continue;
             }
+
+            let mut destination = None;
+            for target_id in &allocated_textures[target_kind] {
+                if !dependencies.contains(target_id) {
+                    destination = Some(*target_id);
+                    break;
+                }
+            }
+
+            let destination = destination.unwrap_or_else(|| {
+                let id = allocator.add_texture(size2(2048, 2048));
+                allocated_textures[target_kind].push(id);
+                id
+            });
+
+            passes[p].targets[target_kind].destination = Some(destination);
         }
-
-        let target = target.unwrap_or_else(|| {
-            let id = allocator.add_texture(size2(2048, 2048));
-            targets.push(id);
-            id
-        });
-
-        passes[p].target = target;
     }
 }
 
@@ -517,30 +483,39 @@ fn allocate_target_rects(
     for pass in passes.iter().rev() {
         pass_index -= 1;
         let first = last_node_refs.len();
-        for &n in &pass.nodes {
-            for &dep in &graph.nodes[n.to_usize()].dependencies {
-                let dep_idx = dep.to_usize();
-                if !visited[dep_idx] {
-                    visited[dep_idx] = true;
-                    last_node_refs.push(dep);
+        for target_kind in 0..NUM_TARGET_KINDS {
+            for &n in &pass.targets[target_kind].nodes {
+                for &dep in &graph.nodes[n.to_usize()].dependencies {
+                    let dep_idx = dep.to_usize();
+                    if !visited[dep_idx] {
+                        visited[dep_idx] = true;
+                        last_node_refs.push(dep);
+                    }
                 }
             }
         }
-
         pass_last_node_ranges[pass_index] = first..last_node_refs.len();
     }
 
     // In the second step we go through each pass in order and perform allocations/deallocations.
     for (pass_index, pass) in passes.iter().enumerate() {
-        if !pass.fixed_target {
-            allocator.begin_pass(pass.target);
+        if pass.fixed_target {
+            continue;
+        }
+
+        for pass_target in &pass.targets {
+            if pass_target.nodes.is_empty() {
+                continue;
+            }
+            let texture = pass_target.destination.unwrap();
+            allocator.begin_pass(texture);
             // Allocations needed for this pass.
-            for &node in &pass.nodes {
+            for &node in &pass_target.nodes {
                 let node_idx = node.to_usize();
                 let size = graph.nodes[node_idx].size;
                 allocated_rects[node_idx] = Some(AllocatedRect {
-                    rect: allocator.allocate(pass.target, size),
-                    texture: pass.target,
+                    rect: allocator.allocate(texture, size),
+                    texture,
                 });
             }
         }
@@ -570,7 +545,9 @@ pub fn build_and_print_graph(graph: &Graph, options: BuilderOptions, with_deallo
     let n_passes = built_graph.passes.len();
     let mut n_nodes = 0;
     for pass in &built_graph.passes {
-        n_nodes += pass.nodes.len();
+        for target in &pass.targets {
+            n_nodes += target.nodes.len();
+        }
     }
 
     println!(
@@ -591,21 +568,26 @@ pub fn build_and_print_graph(graph: &Graph, options: BuilderOptions, with_deallo
 
     for i in 0..built_graph.passes.len() {
         let pass = &built_graph.passes[i];
-        println!("# pass {:?}  {} target {:?}",
-            i,
-            if pass.fixed_target { "  fixed" } else { "dynamic" },
-            pass.target,
-        );
-        for &node in &pass.nodes {
-            println!("  - {:?} {:?}      {}",
-                node,
-                built_graph.nodes[node.to_usize()].name,
-                if let Some(r) = built_graph.allocated_rects[node.to_usize()] {
-                    format!("rect: [({}, {}) {}x{}]", r.rect.origin.x, r.rect.origin.y, r.rect.size.width, r.rect.size.height)
-                } else {
-                    "".to_string()
-                },
-            );
+        println!("# pass {:?}", i);
+        for &target_kind in &[TargetKind::Color, TargetKind::Alpha] {
+            if let Some(texture) = pass.targets[target_kind as usize].destination {
+                println!("  * {} {:?} target {:?}:",
+                    if pass.fixed_target { "  fixed" } else { "dynamic" },
+                    target_kind,
+                    texture,
+                );
+                for &node in &pass.targets[target_kind as usize].nodes {
+                    println!("     - {:?} {:?}      {}",
+                        node,
+                        built_graph.nodes[node.to_usize()].name,
+                        if let Some(r) = built_graph.allocated_rects[node.to_usize()] {
+                            format!("rect: [({}, {}) {}x{}]", r.rect.origin.x, r.rect.origin.y, r.rect.size.width, r.rect.size.height)
+                        } else {
+                            "".to_string()
+                        },
+                    );
+                }
+            }
         }
     }
 }
@@ -614,21 +596,21 @@ pub fn build_and_print_graph(graph: &Graph, options: BuilderOptions, with_deallo
 fn simple_graph() {
     let mut graph = Graph::new();
 
-    let n0 = graph.add_node("useless", size2(100, 100), AllocKind::Dynamic, &[]);
-    let _ = graph.add_node("useless", size2(100, 100), AllocKind::Dynamic, &[n0]);
-    let n2 = graph.add_node("n2", size2(100, 100), AllocKind::Dynamic, &[]);
-    let n3 = graph.add_node("n3", size2(100, 100), AllocKind::Dynamic, &[]);
-    let n4 = graph.add_node("n4", size2(100, 100), AllocKind::Dynamic, &[n2, n3]);
-    let n5 = graph.add_node("n5", size2(100, 100), AllocKind::Dynamic, &[]);
-    let n6 = graph.add_node("n6", size2(100, 100), AllocKind::Dynamic, &[n3, n5]);
-    let n7 = graph.add_node("n7", size2(100, 100), AllocKind::Dynamic, &[n2, n4, n6]);
-    let n8 = graph.add_node("root", size2(800, 600), AllocKind::Fixed(TextureId(100)), &[n7]);
+    let n0 = graph.add_node("useless", TargetKind::Alpha, size2(100, 100), AllocKind::Dynamic, &[]);
+    let _ = graph.add_node("useless", TargetKind::Color, size2(100, 100), AllocKind::Dynamic, &[n0]);
+    let n2 = graph.add_node("n2", TargetKind::Color, size2(100, 100), AllocKind::Dynamic, &[]);
+    let n3 = graph.add_node("n3", TargetKind::Alpha, size2(100, 100), AllocKind::Dynamic, &[]);
+    let n4 = graph.add_node("n4", TargetKind::Alpha, size2(100, 100), AllocKind::Dynamic, &[n2, n3]);
+    let n5 = graph.add_node("n5", TargetKind::Color, size2(100, 100), AllocKind::Dynamic, &[]);
+    let n6 = graph.add_node("n6", TargetKind::Color, size2(100, 100), AllocKind::Dynamic, &[n3, n5]);
+    let n7 = graph.add_node("n7", TargetKind::Color, size2(100, 100), AllocKind::Dynamic, &[n2, n4, n6]);
+    let n8 = graph.add_node("root", TargetKind::Color, size2(800, 600), AllocKind::Fixed(TextureId(100)), &[n7]);
 
     graph.add_root(n5);
     graph.add_root(n8);
 
     for &with_deallocations in &[true] {
-        for &pass_option in &[PassOptions::Recursive, PassOptions::Eager] {
+        for &pass_option in &[PassOptions::Recursive] {
             for &target_option in &[TargetOptions::Direct, TargetOptions::PingPong] {
                 build_and_print_graph(
                     &graph,
@@ -648,30 +630,30 @@ fn simple_graph() {
 fn test_stacked_shadows() {
     let mut graph = Graph::new();
 
-    let pic1 = graph.add_node("picture1", size2(400, 200), AllocKind::Dynamic, &[]);
-    let ds1 = graph.add_node("downscale1", size2(200, 100), AllocKind::Dynamic, &[pic1]);
-    let ds2 = graph.add_node("downscale2", size2(100, 50), AllocKind::Dynamic, &[ds1]);
-    let vblur1 = graph.add_node("vblur1", size2(400, 300), AllocKind::Dynamic, &[ds2]);
-    let hblur1 = graph.add_node("hblur1", size2(500, 300), AllocKind::Dynamic, &[vblur1]);
+    let pic1 = graph.add_node("picture1", TargetKind::Color, size2(400, 200), AllocKind::Dynamic, &[]);
+    let ds1 = graph.add_node("downscale1", TargetKind::Color, size2(200, 100), AllocKind::Dynamic, &[pic1]);
+    let ds2 = graph.add_node("downscale2", TargetKind::Color, size2(100, 50), AllocKind::Dynamic, &[ds1]);
+    let vblur1 = graph.add_node("vblur1", TargetKind::Color, size2(400, 300), AllocKind::Dynamic, &[ds2]);
+    let hblur1 = graph.add_node("hblur1", TargetKind::Color, size2(500, 300), AllocKind::Dynamic, &[vblur1]);
 
-    let vblur2 = graph.add_node("vblur2", size2(400, 350), AllocKind::Dynamic, &[ds2]);
-    let hblur2 = graph.add_node("hblur2", size2(550, 350), AllocKind::Dynamic, &[vblur2]);
+    let vblur2 = graph.add_node("vblur2", TargetKind::Color, size2(400, 350), AllocKind::Dynamic, &[ds2]);
+    let hblur2 = graph.add_node("hblur2", TargetKind::Color, size2(550, 350), AllocKind::Dynamic, &[vblur2]);
 
-    let vblur3 = graph.add_node("vblur3", size2(100, 100), AllocKind::Dynamic, &[ds1]);
-    let hblur3 = graph.add_node("hblur3", size2(100, 100), AllocKind::Dynamic, &[vblur3]);
+    let vblur3 = graph.add_node("vblur3", TargetKind::Color, size2(100, 100), AllocKind::Dynamic, &[ds1]);
+    let hblur3 = graph.add_node("hblur3", TargetKind::Color, size2(100, 100), AllocKind::Dynamic, &[vblur3]);
 
-    let ds3 = graph.add_node("downscale3", size2(100, 50), AllocKind::Dynamic, &[ds2]);
-    let vblur4 = graph.add_node("vblur3", size2(500, 400), AllocKind::Dynamic, &[ds3]);
-    let hblur4 = graph.add_node("hblur3", size2(600, 400), AllocKind::Dynamic, &[vblur4]);
+    let ds3 = graph.add_node("downscale3", TargetKind::Color, size2(100, 50), AllocKind::Dynamic, &[ds2]);
+    let vblur4 = graph.add_node("vblur3", TargetKind::Color, size2(500, 400), AllocKind::Dynamic, &[ds3]);
+    let hblur4 = graph.add_node("hblur3", TargetKind::Color, size2(600, 400), AllocKind::Dynamic, &[vblur4]);
 
-    let root = graph.add_node("root_pic", size2(1000, 1000),
+    let root = graph.add_node("root_pic", TargetKind::Color, size2(1000, 1000),
         AllocKind::Fixed(TextureId(123)),
-        &[hblur1, hblur2, hblur3, hblur4]
+        &[pic1, hblur1, hblur2, hblur3, hblur4]
     );
     graph.add_root(root);
 
     for &with_deallocations in &[false, true] {
-        for &pass_option in &[PassOptions::Recursive, PassOptions::Eager] {
+        for &pass_option in &[PassOptions::Recursive] {
             for &target_option in &[TargetOptions::Direct, TargetOptions::PingPong] {
                 build_and_print_graph(
                     &graph,
