@@ -19,17 +19,9 @@ const MINIMUM_MEDIUM_RECT_SIZE: i32 = 16;
 /// "large" within the free list.
 const MINIMUM_LARGE_RECT_SIZE: i32 = 32;
 
-// /// The amount of time in milliseconds we give ourselves to coalesce rects before giving up.
-// const COALESCING_TIMEOUT: u64 = 100;
-
-// /// The number of items that we process in the coalescing work list before checking whether we hit
-// /// the timeout.
-// const COALESCING_TIMEOUT_CHECKING_INTERVAL: usize = 256;
-
 enum CoalescingStatus {
     Changed,
     Unchanged,
-    Timeout,
 }
 
 /// A texture allocator using the guillotine algorithm with the rectangle merge improvement. See
@@ -162,7 +154,6 @@ impl TexturePage {
 
     fn coalesce_impl<F, U>(
         rects: &mut [DeviceIntRect],
-        _deadline: u64,
         fun_key: F,
         fun_union: U
     ) -> CoalescingStatus where
@@ -173,13 +164,6 @@ impl TexturePage {
         rects.sort_by_key(&fun_key);
 
         for work_index in 0..rects.len() {
-            /*
-            if work_index % COALESCING_TIMEOUT_CHECKING_INTERVAL == 0 &&
-                    time::precise_time_ns() >= deadline {
-                return CoalescingStatus::Timeout
-            }
-            */
-
             let (left, candidates) = rects.split_at_mut(work_index + 1);
             let item = left.last_mut().unwrap();
             if rect_is_empty(item) {
@@ -201,8 +185,8 @@ impl TexturePage {
     }
 
     /// Combine rects that have the same width and are adjacent.
-    fn coalesce_horisontal(rects: &mut [DeviceIntRect], deadline: u64) -> CoalescingStatus {
-        Self::coalesce_impl(rects, deadline,
+    fn coalesce_horisontal(rects: &mut [DeviceIntRect]) -> CoalescingStatus {
+        Self::coalesce_impl(rects,
                             |item| (item.size.width, item.origin.x),
                             |item, candidate| {
             if item.origin.y == candidate.max_y() || item.max_y() == candidate.origin.y {
@@ -214,8 +198,8 @@ impl TexturePage {
     }
 
     /// Combine rects that have the same height and are adjacent.
-    fn coalesce_vertical(rects: &mut [DeviceIntRect], deadline: u64) -> CoalescingStatus {
-        Self::coalesce_impl(rects, deadline,
+    fn coalesce_vertical(rects: &mut [DeviceIntRect]) -> CoalescingStatus {
+        Self::coalesce_impl(rects,
                             |item| (item.size.height, item.origin.y),
                             |item, candidate| {
             if item.origin.x == candidate.max_x() || item.max_x() == candidate.origin.x {
@@ -231,31 +215,21 @@ impl TexturePage {
             return false
         }
 
-        // Iterate to a fixed point or until a timeout is reached.
-        //let deadline = time::precise_time_ns() + COALESCING_TIMEOUT;
-        let deadline = 0;
+        // Iterate to a fixed point.
         self.free_list.copy_to_vec(&mut self.coalesce_vec);
         let mut changed = false;
 
         //Note: we might want to consider try to use the last sorted order first
         // but the elements get shuffled around a bit anyway during the bin placement
 
-        match Self::coalesce_horisontal(&mut self.coalesce_vec, deadline) {
+        match Self::coalesce_horisontal(&mut self.coalesce_vec) {
             CoalescingStatus::Changed => changed = true,
             CoalescingStatus::Unchanged => (),
-            CoalescingStatus::Timeout => {
-                self.free_list.init_from_slice(&self.coalesce_vec);
-                return true
-            }
         }
 
-        match Self::coalesce_vertical(&mut self.coalesce_vec, deadline) {
+        match Self::coalesce_vertical(&mut self.coalesce_vec) {
             CoalescingStatus::Changed => changed = true,
             CoalescingStatus::Unchanged => (),
-            CoalescingStatus::Timeout => {
-                self.free_list.init_from_slice(&self.coalesce_vec);
-                return true
-            }
         }
 
         if changed {
