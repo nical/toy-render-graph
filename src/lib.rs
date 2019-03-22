@@ -1,5 +1,6 @@
 pub mod misc;
 pub mod texture_allocator;
+pub mod allocator;
 
 pub use std::i32;
 use crate::misc::*;
