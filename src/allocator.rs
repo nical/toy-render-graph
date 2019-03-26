@@ -19,6 +19,7 @@ impl Orientation {
     }
 }
 
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum NodeKind {
     Container,
@@ -70,10 +71,13 @@ impl Allocator {
 
         if chosen_id == INVALID_ALLOC {
             //println!("failed to allocate {:?}", *requested_size);
-            self.print_free_rects();
+            //self.print_free_rects();
+
             // No suitable free rect!
             return None;
         }
+
+        // TODO: "round up" the allocated rect to avoid very thin split/leftover rects.
 
         let chosen_node = self.nodes[chosen_id].clone();
         let current_orientation = chosen_node.orientation;
@@ -134,16 +138,16 @@ impl Allocator {
         if orientation == current_orientation {
             if split_rect.size.area() > 0 {
                 let next_sibbling = chosen_node.next_sibbling;
-                // Split free node.
-                split_id = self.nodes.len();
-                self.nodes.push(Node {
+
+                split_id = self.new_node();
+                self.nodes[split_id] = Node {
                     parent: chosen_node.parent,
                     next_sibbling,
                     prev_sibbling: chosen_id,
                     rect: split_rect,
                     kind: NodeKind::Free,
                     orientation: current_orientation,
-                });
+                };
 
                 self.nodes[chosen_id].next_sibbling = split_id;
                 if next_sibbling != INVALID_ALLOC {
@@ -156,28 +160,26 @@ impl Allocator {
             if leftover_rect.size.area() > 0 {
                 self.nodes[chosen_id].kind = NodeKind::Container;
 
-                allocated_id = self.nodes.len();
-                leftover_id = allocated_id + 1;
+                allocated_id = self.new_node();
+                leftover_id = self.new_node();
 
-                // Allocated node.
-                self.nodes.push(Node {
+                self.nodes[allocated_id] = Node {
                     parent: chosen_id,
                     next_sibbling: leftover_id,
                     prev_sibbling: INVALID_ALLOC,
                     rect: allocated_rect,
                     kind: NodeKind::Alloc,
                     orientation: current_orientation.flipped(),
-                });
+                };
 
-                // Leftover free node
-                self.nodes.push(Node {
+                self.nodes[leftover_id] = Node {
                     parent: chosen_id,
                     next_sibbling: INVALID_ALLOC,
                     prev_sibbling: allocated_id,
                     rect: leftover_rect,
                     kind: NodeKind::Free,
                     orientation: current_orientation.flipped(),
-                });
+                };
             } else {
                 // No need to split for the leftover area, we can allocate directly in the chosen node.
                 allocated_id = chosen_id;
@@ -191,71 +193,64 @@ impl Allocator {
             self.nodes[chosen_id].kind = NodeKind::Container;
 
             if split_rect.size.area() > 0 {
-                // Split free node
-                split_id = self.nodes.len();
-
-                // Dependening on whether we have a leftover side we'll allocate either a container node
-                // or directly the the node holding the allocation. Either way it will be the previous
-                // sibling of the split node.
-                let next_allocated_node = split_id + 1;
-
-                self.nodes.push(Node {
+                split_id = self.new_node();
+                self.nodes[split_id] = Node {
                     parent: chosen_id,
                     next_sibbling: INVALID_ALLOC,
-                    prev_sibbling: next_allocated_node,
+                    prev_sibbling: INVALID_ALLOC,
                     rect: split_rect,
                     kind: NodeKind::Free,
                     orientation: current_orientation.flipped(),
-                });
+                };
             } else {
                 split_id = INVALID_ALLOC;
             }
 
             if leftover_rect.size.area() > 0 {
-                // Container node.
-                let container_id = self.nodes.len();
-                self.nodes.push(Node {
+                let container_id = self.new_node();
+                self.nodes[container_id] = Node {
                     parent: chosen_id,
                     next_sibbling: split_id,
                     prev_sibbling: INVALID_ALLOC,
                     rect: DeviceIntRect::zero(),
                     kind: NodeKind::Container,
                     orientation: current_orientation.flipped(),
-                });
+                };
 
-                allocated_id = self.nodes.len();
-                leftover_id = allocated_id + 1;
+                self.nodes[split_id].prev_sibbling = container_id;
 
-                // Allocated node.
-                self.nodes.push(Node {
+                allocated_id = self.new_node();
+                leftover_id = self.new_node();
+
+                self.nodes[allocated_id] = Node {
                     parent: container_id,
                     next_sibbling: leftover_id,
                     prev_sibbling: INVALID_ALLOC,
                     rect: allocated_rect,
                     kind: NodeKind::Alloc,
                     orientation: current_orientation,
-                });
+                };
 
-                // Leftover free node.
-                self.nodes.push(Node {
+                self.nodes[leftover_id] = Node {
                     parent: container_id,
                     next_sibbling: INVALID_ALLOC,
                     prev_sibbling: allocated_id,
                     rect: leftover_rect,
                     kind: NodeKind::Free,
                     orientation: current_orientation,
-                });
+                };
             } else {
-                // Allocated node.
-                allocated_id = self.nodes.len();
-                self.nodes.push(Node {
+                allocated_id = self.new_node();
+                self.nodes[allocated_id] = Node {
                     parent: chosen_id,
                     next_sibbling: split_id,
                     prev_sibbling: INVALID_ALLOC,
                     rect: allocated_rect,
                     kind: NodeKind::Alloc,
                     orientation: current_orientation.flipped(),
-                });
+                };
+
+                self.nodes[split_id].prev_sibbling = allocated_id;
 
                 leftover_id = INVALID_ALLOC;
             }
@@ -270,23 +265,63 @@ impl Allocator {
         }
 
         //println!("allocated {:?}     split: {:?} leftover: {:?}", allocated_rect, split_rect, leftover_rect);
-        self.print_free_rects();
+        //self.print_free_rects();
 
+        #[cfg(feature = "checks")]
         self.check_tree();
 
         Some(allocated_id)
     }
 
-    pub fn deallocate(&mut self, dealloc_id: AllocId) {
-        assert!(dealloc_id < self.nodes.len());
-        assert_eq!(self.nodes[dealloc_id].kind, NodeKind::Alloc);
-        //println!("deallocate rect {} #{:?}", self.nodes[dealloc_id].rect, dealloc_id);
-        self.nodes[dealloc_id].kind = NodeKind::Free;
-        let size = self.nodes[dealloc_id].rect.size;
-        self.add_free_rect(dealloc_id, &size);
+    pub fn deallocate(&mut self, mut node_id: AllocId) {
+        assert!(node_id < self.nodes.len());
+        assert_eq!(self.nodes[node_id].kind, NodeKind::Alloc);
 
-        self.simplify_tree(dealloc_id);
+        //println!("deallocate rect {} #{:?}", self.nodes[node_id].rect, node_id);
+        self.nodes[node_id].kind = NodeKind::Free;
 
+        loop {
+            let orientation = self.nodes[node_id].orientation;
+
+            let next = self.nodes[node_id].next_sibbling;
+            let prev = self.nodes[node_id].prev_sibbling;
+
+            // Try to merge with the next node.
+            if next != INVALID_ALLOC && self.nodes[next].kind == NodeKind::Free {
+                self.merge_sibblings(node_id, next, orientation);
+            }
+
+            // Try to merge with the previous node.
+            if prev != INVALID_ALLOC && self.nodes[prev].kind == NodeKind::Free {
+                self.merge_sibblings(prev, node_id, orientation);
+                node_id = prev;
+            }
+
+            // If this node is now a unique child. We collapse it into its parent and try to merge
+            // again at the parent level.
+            let parent = self.nodes[node_id].parent;
+            if self.nodes[node_id].prev_sibbling == INVALID_ALLOC
+                && self.nodes[node_id].next_sibbling == INVALID_ALLOC
+                && parent != INVALID_ALLOC {
+                //println!("collapse #{:?} into parent #{:?}", node_id, parent);
+
+                self.mark_node_unused(node_id);
+
+                // Replace the parent container with a free node.
+                self.nodes[parent].rect = self.nodes[node_id].rect;
+                self.nodes[parent].kind = NodeKind::Free;
+
+                // Start again at the parent level.
+                node_id = parent;
+            } else {
+
+                let size = self.nodes[node_id].rect.size;
+                self.add_free_rect(node_id, &size);
+                break;
+            }
+        }
+
+        #[cfg(feature = "checks")]
         self.check_tree();
     }
 
@@ -318,6 +353,33 @@ impl Allocator {
         INVALID_ALLOC
     }
 
+    fn new_node(&mut self) -> AllocId {
+        let idx = self.unused_nodes;
+        if idx < self.nodes.len() {
+            self.unused_nodes = self.nodes[idx].next_sibbling;
+            return idx;
+        }
+
+        self.nodes.push(Node {
+            parent: INVALID_ALLOC,
+            next_sibbling: INVALID_ALLOC,
+            prev_sibbling: INVALID_ALLOC,
+            rect: DeviceIntRect::zero(),
+            kind: NodeKind::Unused,
+            orientation: Orientation::Horizontal,
+        });
+
+        self.nodes.len() - 1
+    }
+
+    fn mark_node_unused(&mut self, id: AllocId) {
+        debug_assert!(self.nodes[id].kind != NodeKind::Unused);
+        self.nodes[id].kind = NodeKind::Unused;
+        self.nodes[id].next_sibbling = self.unused_nodes;
+        self.unused_nodes = id;
+    }
+
+    #[cfg(feature = "checks")]
     fn print_free_rects(&self) {
         for &id in &self.free_list {
             if self.nodes[id].kind == NodeKind::Free {
@@ -326,6 +388,7 @@ impl Allocator {
         }
     }
 
+    #[cfg(feature = "checks")]
     fn check_sibblings(&self, id: AllocId, next: AllocId, orientation: Orientation) {
         if next == INVALID_ALLOC {
             return;
@@ -376,7 +439,10 @@ impl Allocator {
                 assert_eq!(self.nodes[iter].orientation, node.orientation);
                 assert_eq!(self.nodes[iter].parent, node.parent);
                 let next = self.nodes[iter].next_sibbling;
+
+                #[cfg(feature = "checks")]
                 self.check_sibblings(iter, next, node.orientation);
+
                 iter = next;
 
             }
@@ -396,52 +462,6 @@ impl Allocator {
         // TODO: Separate small/medium /large free rect lists.
         debug_assert_eq!(self.nodes[id].kind, NodeKind::Free);
         self.free_list.push(id);
-    }
-
-    fn simplify_tree(&mut self, mut node_id: AllocId) {
-        loop {
-            let orientation = self.nodes[node_id].orientation;
-
-            let next = self.nodes[node_id].next_sibbling;
-            let prev = self.nodes[node_id].prev_sibbling;
-
-            // Try to merge with the next node.
-            if next != INVALID_ALLOC && self.nodes[next].kind == NodeKind::Free {
-                self.merge_sibblings(node_id, next, orientation);
-            }
-
-            // Try to merge with the previous node.
-            if prev != INVALID_ALLOC && self.nodes[prev].kind == NodeKind::Free {
-                self.merge_sibblings(prev, node_id, orientation);
-                node_id = prev;
-            }
-
-            // If this node is now a unique child. We collapse it into its parent and try to merge
-            // again at the parent level.
-            let parent = self.nodes[node_id].parent;
-            if self.nodes[node_id].prev_sibbling == INVALID_ALLOC
-                && self.nodes[node_id].next_sibbling == INVALID_ALLOC
-                && parent != INVALID_ALLOC {
-                //println!("collapse #{:?} into parent #{:?}", node_id, parent);
-                self.nodes[node_id].kind = NodeKind::Unused;
-
-                // Add the collapsed node to the list of available slots in the nodes vector.
-                self.nodes[node_id].next_sibbling = self.unused_nodes;
-                self.unused_nodes = node_id;
-
-                // Replace the parent container with a free node.
-                self.nodes[parent].rect = self.nodes[node_id].rect;
-                self.nodes[parent].kind = NodeKind::Free;
-
-                let size = self.nodes[node_id].rect.size;
-                self.add_free_rect(parent, &size);
-
-                // Start again at the parent level.
-                node_id = parent;
-            } else {
-                break;
-            }
-        }
     }
 
     // Merge `next` into `node` and append `next` to a list of available `nodes`vector slots.
@@ -464,12 +484,14 @@ impl Allocator {
         }
 
         // Remove the merged node from the sibbling list.
-        self.nodes[node].next_sibbling = self.nodes[next].next_sibbling;
+        let next_next = self.nodes[next].next_sibbling;
+        self.nodes[node].next_sibbling = next_next;
+        if next_next != INVALID_ALLOC {
+            self.nodes[next_next].prev_sibbling = node;
+        }
 
         // Add the merged node to the list of available slots in the nodes vector.
-        self.nodes[next].kind = NodeKind::Unused;
-        self.nodes[next].next_sibbling = self.unused_nodes;
-        self.unused_nodes = next;
+        self.mark_node_unused(next);
     }
 }
 
@@ -526,8 +548,8 @@ fn atlas_random_test() {
     let mut misses: usize = 0;
 
     let mut allocated = Vec::new();
-    for _ in 0..10000 {
-        if rand() % 2 == 0 && !allocated.is_empty() {
+    for _ in 0..1000000 {
+        if rand() % 5 > 2 && !allocated.is_empty() {
             // deallocate something
             let nth = rand() % allocated.len();
             let id = allocated[nth];
@@ -537,8 +559,8 @@ fn atlas_random_test() {
         } else {
             // allocate something
             let size = size2(
-                (rand() % 1000) as i32 + 1,
-                (rand() % 1000) as i32 + 1,
+                (rand() % 300) as i32 + 5,
+                (rand() % 300) as i32 + 5,
             );
 
             if let Some(id) = atlas.allocate(&size) {
@@ -555,6 +577,7 @@ fn atlas_random_test() {
     }
 
     println!("added/removed {} rectangles, {} misses", n, misses);
+    println!("nodes.cap: {}, free_list.cap: {}", atlas.nodes.capacity(), atlas.free_list.capacity());
 
     let full = atlas.allocate(&size2(1000,1000)).unwrap();
     assert!(atlas.allocate(&size2(1, 1)).is_none());

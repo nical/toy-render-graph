@@ -13,3 +13,6 @@ criterion = "0.2"
 [[bench]]
 name = "cpu_time"
 harness = false
+
+[features]
+checks = []
