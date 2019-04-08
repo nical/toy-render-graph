@@ -1,18 +1,25 @@
+pub extern crate guillotiere;
+#[cfg(feature = "serialization")]
+#[macro_use]
+pub extern crate serde;
+
 pub mod misc;
-pub mod texture_allocator;
-pub mod allocator;
+pub mod svg;
 
 pub use std::i32;
 use crate::misc::*;
+pub use crate::misc::{TextureId, NodeId};
 
-pub struct DeviceSpace;
-pub type DeviceIntRect = euclid::TypedRect<i32, DeviceSpace>;
-pub type DeviceIntPoint = euclid::TypedPoint2D<i32, DeviceSpace>;
-pub type DeviceIntSize = euclid::TypedSize2D<i32, DeviceSpace>;
-pub use euclid::size2;
+pub use guillotiere::{Rectangle, Size, Point};
+pub use euclid::{size2, vec2, point2};
 
-pub use crate::misc::{AtlasAllocator, DummyAtlasAllocator, GuillotineAllocator, DbgAtlasAllocator};
+type FloatRectangle = euclid::Box2D<f32>;
+type FloatPoint = euclid::Point2D<f32>;
+type FloatSize = euclid::Size2D<f32>;
 
+pub use crate::misc::{TextureAllocator, GuillotineAllocator, DbgTextureAllocator};
+
+#[cfg_attr(feature = "serialization", derive(Serialize, Deserialize))]
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum TargetKind {
     Color = 0,
@@ -21,21 +28,24 @@ pub enum TargetKind {
 
 const NUM_TARGET_KINDS: usize = 2;
 
+#[cfg_attr(feature = "serialization", derive(Serialize, Deserialize))]
 #[derive(Clone)]
 pub struct Node {
     pub name: String,
-    pub size: DeviceIntSize,
+    pub size: Size,
     pub alloc_kind: AllocKind,
     pub dependencies: Vec<NodeId>,
     pub target_kind: TargetKind,
 }
 
+#[cfg_attr(feature = "serialization", derive(Serialize, Deserialize))]
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum AllocKind {
     Fixed(TextureId),
     Dynamic,
 }
 
+#[cfg_attr(feature = "serialization", derive(Serialize, Deserialize))]
 #[derive(Clone)]
 pub struct Graph {
     nodes: Vec<Node>,
@@ -50,7 +60,7 @@ impl Graph {
         }
     }
 
-    pub fn add_node(&mut self, name: &str, target_kind: TargetKind, size: DeviceIntSize, alloc_kind: AllocKind, deps: &[NodeId]) -> NodeId {
+    pub fn add_node(&mut self, name: &str, target_kind: TargetKind, size: Size, alloc_kind: AllocKind, deps: &[NodeId]) -> NodeId {
         let id = node_id(self.nodes.len());
         self.nodes.push(Node {
             name: name.to_string(),
@@ -68,6 +78,7 @@ impl Graph {
     }
 }
 
+#[cfg_attr(feature = "serialization", derive(Serialize, Deserialize))]
 pub struct BuiltGraph {
     pub nodes: Vec<Node>,
     pub roots: Vec<NodeId>,
@@ -75,33 +86,40 @@ pub struct BuiltGraph {
     pub passes: Vec<Pass>,
 }
 
+#[cfg_attr(feature = "serialization", derive(Serialize, Deserialize))]
 pub struct Pass {
     pub targets: [PassTarget; NUM_TARGET_KINDS],
     pub fixed_target: bool,
 }
 
+#[cfg_attr(feature = "serialization", derive(Serialize, Deserialize))]
 pub struct PassTarget {
     nodes: Vec<NodeId>,
     destination: Option<TextureId>,
 }
 
+#[cfg_attr(feature = "serialization", derive(Serialize, Deserialize))]
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
-pub struct AllocatedRect {
-    pub rect: DeviceIntRect,
-    pub texture: TextureId,
+pub enum TargetDestination {
+    Dynamic(TextureId),
+    Fixed(TextureId),
 }
 
+
+#[cfg_attr(feature = "serialization", derive(Serialize, Deserialize))]
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum PassOptions {
     Recursive,
 }
 
+#[cfg_attr(feature = "serialization", derive(Serialize, Deserialize))]
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum TargetOptions {
     Direct,
     PingPong,
 }
 
+#[cfg_attr(feature = "serialization", derive(Serialize, Deserialize))]
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct BuilderOptions {
     pub passes: PassOptions,
@@ -109,6 +127,7 @@ pub struct BuilderOptions {
     pub culling: bool,
 }
 
+#[cfg_attr(feature = "serialization", derive(Serialize, Deserialize))]
 pub struct GraphBuilder {
     options: BuilderOptions,
 }
@@ -118,7 +137,7 @@ impl GraphBuilder {
         GraphBuilder { options }
     }
 
-    pub fn build(&mut self, mut graph: Graph, allocator: &mut dyn AtlasAllocator) -> BuiltGraph {
+    pub fn build(&mut self, mut graph: Graph, allocator: &mut dyn TextureAllocator) -> BuiltGraph {
 
         // Step 1 - Sort the nodes in a valid execution order (nodes appear after
         // the nodes they depend on.
@@ -305,6 +324,7 @@ fn create_passes_recursive(
         if !active_nodes[node_idx] {
             continue;
         }
+
         let target_kind = graph.nodes[node_idx].target_kind;
         let pass_index = max_depth - node_rev_passes[node_idx];
         passes[pass_index].targets[target_kind as usize].nodes.push(node_id(node_idx));
@@ -321,21 +341,20 @@ fn assign_targets_ping_pong(
     passes: &mut[Pass],
     nodes: &mut Vec<Node>,
     node_passes: &mut [i32],
-    allocator: &mut dyn AtlasAllocator,
+    allocator: &mut dyn TextureAllocator,
 ) {
     let mut node_redirects = vec![None; nodes.len()];
 
-    // TODO: Figure out a strategy for target sizes.
     let texture_ids = [
         // color
         [
-            allocator.add_texture(size2(2048, 2048)),
-            allocator.add_texture(size2(2048, 2048)),
+            allocator.add_texture(),
+            allocator.add_texture(),
         ],
         // alpha
         [
-            allocator.add_texture(size2(2048, 2048)),
-            allocator.add_texture(size2(2048, 2048)),
+            allocator.add_texture(),
+            allocator.add_texture(),
         ],
     ];
 
@@ -407,7 +426,7 @@ fn assign_targets_direct(
     passes: &mut[Pass],
     nodes: &mut Vec<Node>,
     node_passes: &mut [i32],
-    allocator: &mut dyn AtlasAllocator,
+    allocator: &mut dyn TextureAllocator,
 ) {
     let mut allocated_textures = [Vec::new(), Vec::new()];
     let mut dependencies = std::collections::HashSet::new();
@@ -445,7 +464,7 @@ fn assign_targets_direct(
             }
 
             let destination = destination.unwrap_or_else(|| {
-                let id = allocator.add_texture(size2(2048, 2048));
+                let id = allocator.add_texture();
                 allocated_textures[target_kind].push(id);
                 id
             });
@@ -459,13 +478,13 @@ fn assign_targets_direct(
 /// result of each node is needed and allocate portions of the render targets
 /// accordingly.
 /// This method computes the lifetime of each node and delegates the allocation
-/// logic to the AtlasAllocator implementation.
+/// logic to the TextureAllocator implementation.
 fn allocate_target_rects(
     graph: &Graph,
     passes: &[Pass],
     visited: &mut[bool],
     allocated_rects: &mut Vec<Option<AllocatedRect>>,
-    allocator: &mut dyn AtlasAllocator,
+    allocator: &mut dyn TextureAllocator,
 ) {
     let mut last_node_refs: Vec<NodeId> = Vec::with_capacity(graph.nodes.len());
     let mut pass_last_node_ranges: Vec<std::ops::Range<usize>> = vec![0..0; passes.len()];
@@ -509,15 +528,12 @@ fn allocate_target_rects(
                 continue;
             }
             let texture = pass_target.destination.unwrap();
-            allocator.begin_pass(texture);
+
             // Allocations needed for this pass.
             for &node in &pass_target.nodes {
                 let node_idx = node.to_usize();
                 let size = graph.nodes[node_idx].size;
-                allocated_rects[node_idx] = Some(AllocatedRect {
-                    rect: allocator.allocate(texture, size),
-                    texture,
-                });
+                allocated_rects[node_idx] = Some(allocator.allocate(texture, size));
             }
         }
 
@@ -527,8 +543,7 @@ fn allocate_target_rects(
             let node_idx = finished_node.to_usize();
             if let Some(allocated_rect) = allocated_rects[node_idx] {
                 allocator.deallocate(
-                    allocated_rect.texture,
-                    &allocated_rect.rect,
+                    allocated_rect.id,
                 );
             }
         }
@@ -538,7 +553,7 @@ fn allocate_target_rects(
 pub fn build_and_print_graph(graph: &Graph, options: BuilderOptions, with_deallocations: bool) {
     let mut builder = GraphBuilder::new(options);
     let mut allocator = GuillotineAllocator::new();
-    let mut allocator = DbgAtlasAllocator::new(&mut allocator);
+    let mut allocator = DbgTextureAllocator::new(&mut allocator);
     allocator.record_deallocations = with_deallocations;
 
     let built_graph = builder.build(graph.clone(), &mut allocator);
@@ -582,7 +597,7 @@ pub fn build_and_print_graph(graph: &Graph, options: BuilderOptions, with_deallo
                         node,
                         built_graph.nodes[node.to_usize()].name,
                         if let Some(r) = built_graph.allocated_rects[node.to_usize()] {
-                            format!("rect: [({}, {}) {}x{}]", r.rect.origin.x, r.rect.origin.y, r.rect.size.width, r.rect.size.height)
+                            format!("rect: [({}, {}) {}x{}]", r.rectangle.min.x, r.rectangle.min.y, r.rectangle.size().width, r.rectangle.size().height)
                         } else {
                             "".to_string()
                         },
@@ -591,6 +606,159 @@ pub fn build_and_print_graph(graph: &Graph, options: BuilderOptions, with_deallo
             }
         }
     }
+}
+
+#[derive(Copy, Clone, Debug)]
+pub struct VerticalLayout {
+    pub start: FloatPoint,
+    pub y: f32,
+    pub width: f32,
+}
+
+impl VerticalLayout {
+    fn new(start: FloatPoint, width: f32) -> Self {
+        VerticalLayout {
+            start,
+            y: start.y,
+            width,
+        }
+    }
+
+    fn advance(&mut self, by: f32) {
+        self.y += by;
+    }
+
+    fn push_rectangle(&mut self, height: f32) -> FloatRectangle {
+        let rect = FloatRectangle {
+            min: point2(self.start.x, self.y),
+            max: point2(self.start.x + self.width, self.y + height),
+        };
+        self.y += height;
+
+        rect
+    }
+
+    fn total_rectangle(&self) -> FloatRectangle {
+        FloatRectangle {
+            min: self.start,
+            max: point2(self.start.x + self.width, self.y),
+        }
+    }
+
+    fn start_here(&mut self) {
+        self.start.y = self.y;
+    }
+}
+
+pub fn dump_svg(output: &mut dyn std::io::Write, graph: &BuiltGraph, allocator: &GuillotineAllocator) {
+    let node_width = 80.0;
+    let node_height = 40.0;
+    let texture_box_height = 15.0;
+    let vertical_spacing = 10.0;
+    let horizontal_spacing = 40.0;
+    let margin = 10.0;
+
+    let mut target_rects = Vec::new();
+    let mut texture_info = Vec::new();
+    let mut node_label_rects = vec![None; graph.nodes.len()];
+    let mut x = margin;
+    let mut max_y: f32 = 0.0;
+    for pass in &graph.passes {
+        let mut layout = VerticalLayout::new(point2(x, margin), node_width);
+        for target in &pass.targets {
+            if target.nodes.is_empty() {
+                continue;
+            }
+
+            layout.start_here();
+            let mut allocated_rects = Vec::new();
+            for &node in &target.nodes {
+                node_label_rects[node.to_usize()] = Some(layout.push_rectangle(node_height));
+                layout.advance(vertical_spacing);
+                allocated_rects.push(graph.allocated_rects[node.to_usize()].unwrap());
+            }
+
+            let texture_label_rect = layout.push_rectangle(texture_box_height);
+
+            let tex_size = allocator.textures[target.destination.unwrap().to_usize()].size().to_f32();
+            let scale = tex_size.width / node_width;
+            layout.push_rectangle(tex_size.height / scale);
+
+            target_rects.push(layout.total_rectangle().inflate(5.0, 5.0));
+
+            texture_info.push((
+                texture_label_rect,
+                target.destination,
+                allocated_rects,
+            ));
+        }
+        x += node_width + horizontal_spacing;
+        max_y = max_y.max(layout.y + 100.0);
+    }
+
+    let svg_size: FloatSize = size2(x + margin, max_y + margin);
+    svg::begin_svg(output, &svg_size);
+    let bg_rect = FloatRectangle {
+        min: point2(0.0, 0.0),
+        max: point2(svg_size.width, svg_size.height),
+    }.inflate(1.0, 1.0);
+    svg::rectangle(output, &bg_rect, 0.0, "fill:rgb(50,50,50)");
+
+    for rect in &target_rects {
+        svg::rectangle(output, rect, 5.0, "stroke:none;fill:black;fill-opacity:0.2");
+    }
+
+    for (i, rect) in node_label_rects.iter().enumerate() {
+        if let Some(rect) = rect {
+            let pos = rect.min;
+            for input in &graph.nodes[i].dependencies {
+                let input_pos = node_label_rects[input.to_usize()].unwrap().min;
+                let from = input_pos + vec2(node_width, node_height / 2.0);
+                let to = pos + vec2(0.0, node_height / 2.0);
+                svg::link(output, from + vec2(0.0, 1.0), to + vec2(0.0, 1.0), "stroke:black;stroke-opacity:0.4;stroke-width:3px;");
+                svg::link(output, from, to, "stroke:rgb(100, 100, 100);stroke-width:3px;");
+            }
+        }
+    }
+
+    for rect in &node_label_rects {
+        if let Some(rect) = rect {
+            svg::rectangle(output, &rect.translate(&vec2(0.0, 2.0)), 3.0, "stroke:none;fill:black;fill-opacity:0.4");
+            svg::rectangle(output, rect, 3.0, "stroke:none;fill:rgb(200, 200, 200);fill-opacity:0.8");
+        }
+    }
+
+    for &(ref rect, dest, ref alloc_rects) in &texture_info {
+        let atlas_min = rect.min + vec2(0.0, texture_box_height);
+        let tex_size = allocator.textures[dest.unwrap().to_usize()].size().to_f32();
+        let scale = tex_size.width / node_width;
+        let atlas_rect = FloatRectangle {
+            min: atlas_min,
+            max: atlas_min + vec2(tex_size.width, tex_size.height) / scale,
+        };
+
+        // Per-texture label.
+        svg::rectangle(output, &rect.translate(&vec2(0.0, 2.0)), 3.0, "stroke:none;fill:black;fill-opacity:0.4");
+        svg::rectangle(output, rect, 3.0, "stroke:none;fill:rgb(200, 200, 200);fill-opacity:0.8");
+        let text_pos = point2((rect.min.x + rect.max.x)/2.0 - 5.0, rect.min.y + 10.0);
+        svg::text(output, &format!("{:?} {}", dest.unwrap(), tex_size), 6.0, text_pos, "text-anchor:middle;text-align:center;");
+
+        // Atlas.
+        svg::rectangle(output, &atlas_rect, 0.0, "stroke:none;fill:black;fill-opacity:0.5");
+        for alloc in alloc_rects {
+            let scaled_rect = alloc.rectangle.to_f32() / scale;
+            svg::rectangle(output, &scaled_rect.translate(&atlas_rect.min.to_vector()), 0.0, "stroke:none;fill:rgb(200, 0, 0);fill-opacity:0.8")
+        }
+    }
+
+    for (i, rect) in node_label_rects.iter().enumerate() {
+        if let Some(rect) = rect {
+            let pos = point2((rect.min.x + rect.max.x)/2.0 - 6.0, (rect.min.y + rect.max.y) / 2.0);
+            svg::text(output, &graph.nodes[i].name, 10.0, pos, "text-anchor:middle;text-align:center;");
+        }
+    }
+
+    svg::end_svg(output);
 }
 
 #[test]
@@ -637,7 +805,7 @@ fn test_stacked_shadows() {
     let vblur1 = graph.add_node("vblur1", TargetKind::Color, size2(400, 300), AllocKind::Dynamic, &[ds2]);
     let hblur1 = graph.add_node("hblur1", TargetKind::Color, size2(500, 300), AllocKind::Dynamic, &[vblur1]);
 
-    let vblur2 = graph.add_node("vblur2", TargetKind::Color, size2(400, 350), AllocKind::Dynamic, &[ds2]);
+    let vblur2 = graph.add_node("vblur2", TargetKind::Color, size2(400, 350), AllocKind::Fixed(TextureId(1337)), &[ds2]);
     let hblur2 = graph.add_node("hblur2", TargetKind::Color, size2(550, 350), AllocKind::Dynamic, &[vblur2]);
 
     let vblur3 = graph.add_node("vblur3", TargetKind::Color, size2(100, 100), AllocKind::Dynamic, &[ds1]);
@@ -668,5 +836,17 @@ fn test_stacked_shadows() {
             }
         }
     }
+
+/* TODO
+    let mut builder = GraphBuilder::new(BuilderOptions {
+        passes: PassOptions::Recursive,
+        targets: TargetOptions::PingPong,
+        culling: true,
+    });
+    let mut allocator = GuillotineAllocator::new();
+    let built_graph = builder.build(graph.clone(), &mut allocator);
+    let mut file = std::fs::File::create("graph.svg").unwrap();
+    dump_svg(&mut file, &built_graph, &allocator);
+*/
 }
 

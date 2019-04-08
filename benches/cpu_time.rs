@@ -116,7 +116,7 @@ fn do_bench_no_allocator(
 
             let mut builder = GraphBuilder::new(options);
 
-            let mut allocator = DummyAtlasAllocator::new();
+            let mut allocator = DummyTextureAllocator::new();
 
             b.iter(|| {
                 let _ = builder.build(graph.clone(), &mut allocator);

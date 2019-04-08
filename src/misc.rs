@@ -1,8 +1,10 @@
 use std::usize;
 use std::collections::HashSet;
-use crate::texture_allocator::*;
-use crate::{DeviceIntSize, DeviceIntRect};
+use crate::{Size, Rectangle, size2};
 
+pub use guillotiere::{AtlasAllocator, Allocation, AllocId as RectangleId, AllocatorOptions};
+
+#[cfg_attr(feature = "serialization", derive(Serialize, Deserialize))]
 #[repr(transparent)]
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct NodeId(u32);
@@ -16,9 +18,10 @@ pub(crate) fn node_id(idx: usize) -> NodeId {
     NodeId(idx as u32)
 }
 
+#[cfg_attr(feature = "serialization", derive(Serialize, Deserialize))]
 #[repr(transparent)]
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
-pub struct TextureId(pub(crate) u32);
+pub struct TextureId(pub u32);
 
 impl TextureId {
     pub fn to_usize(self) -> usize { self.0 as usize }
@@ -29,86 +32,167 @@ pub(crate) fn texture_id(idx: usize) -> TextureId {
     TextureId(idx as u32)
 }
 
-pub trait AtlasAllocator {
-    fn add_texture(&mut self, size: DeviceIntSize) -> TextureId;
-    fn allocate(&mut self, tex: TextureId, size: DeviceIntSize) -> DeviceIntRect;
-    fn deallocate(&mut self, tex: TextureId, rect: &DeviceIntRect);
-    fn begin_pass(&mut self, _texture_id: TextureId) {}
+
+#[cfg_attr(feature = "serialization", derive(Serialize, Deserialize))]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub struct AllocatedRect {
+    pub rectangle: Rectangle,
+    pub id: AllocId,
 }
 
-pub struct DummyAtlasAllocator {
-    tex: u32,
+#[cfg_attr(feature = "serialization", derive(Serialize, Deserialize))]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub struct AllocId {
+    pub texture: TextureId,
+    pub slice: u32,
+    pub rectangle: RectangleId,
 }
 
-impl DummyAtlasAllocator {
-    pub fn new() -> Self {
-        DummyAtlasAllocator { tex: 0 }
+pub struct TextureArray {
+    slices: Vec<AtlasAllocator>,
+    size: Size,
+    id: TextureId,
+    options: AllocatorOptions,
+}
+
+impl TextureArray {
+    pub fn new(id: TextureId, size: Size) -> Self {
+        TextureArray {
+            slices: Vec::new(),
+            size,
+            id,
+            options: guillotiere::DEFAULT_OPTIONS,
+        }
+    }
+
+    pub fn allocate(&mut self, size: Size) -> AllocatedRect {
+        if self.size.width < size.width || self.size.height < size.height {
+            self.resize(size);
+        }
+
+        if let Some(slice) = self.slices.last_mut() {
+            if let Some(alloc) = slice.allocate(size) {
+                return AllocatedRect {
+                    rectangle: alloc.rectangle,
+                    id: AllocId {
+                        texture: self.id,
+                        slice: self.slices.len() as u32,
+                        rectangle: alloc.id,
+                    }
+                };
+            }
+        }
+
+        for slice in &mut self.slices {
+            if let Some(alloc) = slice.allocate(size) {
+                return AllocatedRect {
+                    rectangle: alloc.rectangle,
+                    id: AllocId {
+                        texture: self.id,
+                        slice: self.slices.len() as u32,
+                        rectangle: alloc.id,
+                    },
+                };
+            }
+        }
+
+        self.slices.push(AtlasAllocator::with_options(self.size, &self.options));
+
+        let alloc = self.slices.last_mut().unwrap().allocate(size).unwrap();
+
+        AllocatedRect {
+            rectangle: alloc.rectangle,
+            id: AllocId {
+                texture: self.id,
+                slice: self.slices.len() as u32,
+                rectangle: alloc.id,
+            },
+        }
+    }
+
+    pub fn deallocate(&mut self, id: AllocId) {
+        assert_eq!(self.id, id.texture);
+        self.slices[id.slice as usize].deallocate(id.rectangle);
+    }
+
+    pub fn resize(&mut self, mut new_size: Size) {
+        new_size.width = new_size.width.max(self.size.width);
+        new_size.height = new_size.height.max(self.size.height);
+        for slice in &mut self.slices {
+            slice.grow(new_size);
+        }
+    }
+
+    pub fn num_slices(&self) -> usize {
+        self.slices.len()
+    }
+
+    pub fn texture_size(&self) -> Size {
+        self.size
     }
 }
 
-impl AtlasAllocator for DummyAtlasAllocator {
-    fn add_texture(&mut self, _size: DeviceIntSize) -> TextureId {
-        let id = self.tex;
-        self.tex += 1;
-        TextureId(id)
-    }
-
-    fn allocate(&mut self, texture_id: TextureId, _size: DeviceIntSize) -> DeviceIntRect {
-        assert!(texture_id.0 < self.tex);
-        DeviceIntRect::zero()
-    }
-
-    fn deallocate(&mut self, texture_id: TextureId, _rect: &DeviceIntRect) {
-        assert!(texture_id.0 < self.tex);
-    }
+pub trait TextureAllocator {
+    fn add_texture(&mut self) -> TextureId;
+    fn allocate(&mut self, tex: TextureId, size: Size) -> AllocatedRect;
+    fn deallocate(&mut self, id: AllocId);
 }
 
 pub struct GuillotineAllocator {
-    pub textures: Vec<TexturePage>,
+    pub textures: Vec<AtlasAllocator>,
+    pub size: Size,
 }
 
 impl GuillotineAllocator {
     pub fn new() -> Self {
         GuillotineAllocator {
             textures: Vec::new(),
+            size: size2(1024, 1024),
         }
     }
 }
 
-impl AtlasAllocator for GuillotineAllocator {
+impl TextureAllocator for GuillotineAllocator {
 
-    fn add_texture(&mut self, size: DeviceIntSize) -> TextureId {
-        self.textures.push(TexturePage::new(size));
+    fn add_texture(&mut self) -> TextureId {
+        self.textures.push(AtlasAllocator::new(self.size));
         texture_id(self.textures.len() - 1)
     }
 
-    fn allocate(&mut self, texture_id: TextureId, size: DeviceIntSize) -> DeviceIntRect {
-        DeviceIntRect {
-            origin: self.textures[texture_id.to_usize()].allocate(&size).unwrap(),
-            size,
+    fn allocate(&mut self, texture_id: TextureId, size: Size) -> AllocatedRect {
+        let atlas = &mut self.textures[texture_id.to_usize()];
+        loop {
+            if let Some(alloc) = atlas.allocate(size) {
+                return AllocatedRect {
+                    rectangle: alloc.rectangle,
+                    id: AllocId {
+                        texture: texture_id,
+                        rectangle: alloc.id,
+                        slice: 0,
+                    }
+                }
+            }
+            let new_size = atlas.size() * 2;
+            atlas.grow(new_size);
         }
     }
 
-    fn deallocate(&mut self, texture_id: TextureId, rect: &DeviceIntRect) {
-        self.textures[texture_id.to_usize()].free(&rect);
-    }
-
-    fn begin_pass(&mut self, texture_id: TextureId) {
-        self.textures[texture_id.to_usize()].coalesce();
+    fn deallocate(&mut self, id: AllocId) {
+        self.textures[id.texture.to_usize()].deallocate(id.rectangle);
     }
 }
 
-pub struct DbgAtlasAllocator<'l> {
-    pub allocator: &'l mut dyn AtlasAllocator,
-    pub textures: Vec<HashSet<DeviceIntRect>>,
+pub struct DbgTextureAllocator<'l> {
+    pub allocator: &'l mut dyn TextureAllocator,
+    pub textures: Vec<HashSet<Rectangle>>,
     pub max_pixels: i32,
     pub max_rects: usize,
     pub record_deallocations: bool,
 }
 
-impl<'l> DbgAtlasAllocator<'l> {
-    pub fn new(allocator: &'l mut dyn AtlasAllocator) -> Self {
-        DbgAtlasAllocator {
+impl<'l> DbgTextureAllocator<'l> {
+    pub fn new(allocator: &'l mut dyn TextureAllocator) -> Self {
+        DbgTextureAllocator {
             allocator,
             textures: Vec::new(),
             max_pixels: 0,
@@ -122,16 +206,16 @@ impl<'l> DbgAtlasAllocator<'l> {
     pub fn max_allocated_rects(&self) -> usize { self.max_rects }
 }
 
-impl<'l> AtlasAllocator for DbgAtlasAllocator<'l> {
-    fn add_texture(&mut self, size: DeviceIntSize) -> TextureId {
+impl<'l> TextureAllocator for DbgTextureAllocator<'l> {
+    fn add_texture(&mut self) -> TextureId {
         self.textures.push(HashSet::new());
-        self.allocator.add_texture(size)
+        self.allocator.add_texture()
     }
 
-    fn allocate(&mut self, texture_id: TextureId, size: DeviceIntSize) -> DeviceIntRect {
-        let rect = self.allocator.allocate(texture_id, size);
+    fn allocate(&mut self, texture_id: TextureId, size: Size) -> AllocatedRect {
+        let alloc = self.allocator.allocate(texture_id, size);
 
-        self.textures[texture_id.to_usize()].insert(rect);
+        self.textures[texture_id.to_usize()].insert(alloc.rectangle);
 
         let mut pixels = 0;
         let mut rects = 0;
@@ -145,17 +229,14 @@ impl<'l> AtlasAllocator for DbgAtlasAllocator<'l> {
         self.max_pixels = std::cmp::max(self.max_pixels, pixels);
         self.max_rects = std::cmp::max(self.max_rects, rects);
 
-        rect
+        alloc
     }
 
-    fn deallocate(&mut self, texture_id: TextureId, rect: &DeviceIntRect) {
+    fn deallocate(&mut self, id: AllocId) {
         if self.record_deallocations {
-            self.textures[texture_id.to_usize()].remove(&rect);
-            self.allocator.deallocate(texture_id, rect);
+            //self.textures[texture_id.to_usize()].remove(&id);
+            self.allocator.deallocate(id);
         }
     }
-
-    fn begin_pass(&mut self, texture_id: TextureId) {
-        self.allocator.begin_pass(texture_id);
-    }
 }
+
