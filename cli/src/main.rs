@@ -236,7 +236,7 @@ pub struct Session {
     allocator_options: AllocatorOptions,
     default_size: Size,
     next_name: i32,
-    next_task_id: u32,
+    next_task_id: u64,
 }
 
 fn init(args: &ArgMatches) {
