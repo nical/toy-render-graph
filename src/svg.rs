@@ -1,7 +1,7 @@
 use std::io::Write;
 use euclid::{point2, vec2, size2};
 use crate::{FloatPoint, FloatRectangle, FloatSize};
-use crate::{GuillotineAllocator, BuiltGraph};
+use crate::{GuillotineAllocator, BuiltGraph, NodeId};
 
 pub fn rectangle(output: &mut dyn Write, rect: &FloatRectangle, radius: f32, style: &str) {
     write!(output,
@@ -18,13 +18,13 @@ pub fn rectangle(output: &mut dyn Write, rect: &FloatRectangle, radius: f32, sty
 pub fn text(output: &mut dyn Write, text: &str, size: f32, position: FloatPoint, style: &str) {
     write!(output,
 r#"
-    <text x="{}" y="{}" style="{};font-style:normal;font-weight:normal;font-size:{}px;line-height:1.25;font-family:sans-serif;letter-spacing:0px;word-spacing:0px;fill:#000000;fill-opacity:1;stroke:none;stroke-width:0.26458332" xml:space="preserve">
+    <text x="{}" y="{}" style="font-style:normal;font-weight:normal;font-size:{}px;line-height:1.25;font-family:sans-serif;stroke:none;{}">
         <tspan>{}</tspan>
     </text>
 "#,
         position.x, position.y,
-        style,
         size,
+        style,
         text,
     ).unwrap();
 }
@@ -110,7 +110,12 @@ impl VerticalLayout {
     }
 }
 
-pub fn dump_svg(output: &mut dyn std::io::Write, graph: &BuiltGraph, allocator: &GuillotineAllocator) {
+pub fn dump_svg<'l>(
+    output: &mut dyn std::io::Write,
+    graph: &BuiltGraph,
+    allocator: &GuillotineAllocator,
+    names: Option<&'l dyn Fn(NodeId) -> &'l str>,
+) {
     let node_width = 80.0;
     let node_height = 40.0;
     let texture_box_height = 15.0;
@@ -198,23 +203,30 @@ pub fn dump_svg(output: &mut dyn std::io::Write, graph: &BuiltGraph, allocator: 
         };
 
         // Per-texture label.
-        rectangle(output, &rect.translate(&vec2(0.0, 2.0)), 3.0, "stroke:none;fill:black;fill-opacity:0.4");
-        rectangle(output, rect, 3.0, "stroke:none;fill:rgb(200, 200, 200);fill-opacity:0.8");
-        let text_pos = point2((rect.min.x + rect.max.x)/2.0 - 5.0, rect.min.y + 10.0);
-        text(output, &format!("{:?} {}", dest.unwrap(), tex_size), 6.0, text_pos, "text-anchor:middle;text-align:center;");
+        //rectangle(output, &rect.translate(&vec2(0.0, 2.0)), 3.0, "stroke:none;fill:black;fill-opacity:0.4");
+        //rectangle(output, rect, 1.0, "stroke:none;fill:black;fill-opacity:0.6");
+        let text_pos = point2((rect.min.x + rect.max.x)/2.0, rect.min.y + 10.0);
+        text(output, &format!("{:?} - {}", dest.unwrap(), tex_size), 5.0, text_pos, "text-anchor:middle;text-align:center;fill:rgb(250,250,250);");
 
         // Atlas.
         rectangle(output, &atlas_rect, 0.0, "stroke:none;fill:black;fill-opacity:0.5");
         for alloc in alloc_rects {
             let scaled_rect = alloc.rectangle.to_f32() / scale;
-            rectangle(output, &scaled_rect.translate(&atlas_rect.min.to_vector()), 0.0, "stroke:none;fill:rgb(200, 0, 0);fill-opacity:0.8")
+            rectangle(output, &scaled_rect.translate(&atlas_rect.min.to_vector()).inflate(-0.1, -0.1), 0.0, "stroke:none;fill:rgb(50,70,180);fill-opacity:0.8");
         }
     }
 
     for (i, rect) in node_label_rects.iter().enumerate() {
         if let Some(rect) = rect {
-            let pos = point2((rect.min.x + rect.max.x)/2.0 - 6.0, (rect.min.y + rect.max.y) / 2.0);
-            text(output, &graph.nodes[i].name, 10.0, pos, "text-anchor:middle;text-align:center;");
+            let pos = point2((rect.min.x + rect.max.x)/2.0, rect.min.y + 12.0);
+            let name = format!("{}", names.map(|f| f(NodeId(i as u32))).unwrap_or(""));
+            let kind = format!("TaskKind::{:?}", graph.nodes[i].task_kind);
+            let size = format!("{}", graph.nodes[i].size);
+            let style = "text-anchor:middle;text-align:center;";
+            text(output, &name, 10.0, pos, style);
+            let style = "text-anchor:middle;text-align:center;fill:rgb(50,50,50)";
+            text(output, &kind, 6.0, pos + vec2(0.0, 12.0), style);
+            text(output, &size, 6.0, pos + vec2(0.0, 22.0), style);
         }
     }
 

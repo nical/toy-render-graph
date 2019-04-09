@@ -235,7 +235,8 @@ pub struct Session {
     names: HashMap<String, NodeId>,
     allocator_options: AllocatorOptions,
     default_size: Size,
-    next_id: i32,
+    next_name: i32,
+    next_task_id: u32,
 }
 
 fn init(args: &ArgMatches) {
@@ -262,7 +263,8 @@ fn init(args: &ArgMatches) {
         names: std::collections::HashMap::default(),
         allocator_options,
         default_size: size2(w, h),
-        next_id: 0,
+        next_name: 0,
+        next_task_id: 0,
     };
 
     write_graph(&session, &args);
@@ -293,8 +295,8 @@ fn node(args: &ArgMatches) {
     }
 
     let name = args.value_of("NAME").map(|name| name.to_string()).unwrap_or_else(|| {
-        session.next_id += 1;
-        format!("#{}", session.next_id)
+        session.next_name += 1;
+        format!("#{}", session.next_name)
     });
 
     let target_kind = match args.value_of("TARGET_KIND") {
@@ -310,7 +312,8 @@ fn node(args: &ArgMatches) {
     let w = args.value_of("WIDTH").expect("Missing width.").parse::<i32>().unwrap();
     let h = args.value_of("HEIGHT").expect("Missing height.").parse::<i32>().unwrap();
 
-    let id = session.graph.add_node(&name, target_kind, size2(w, h), alloc_kind, &inputs[..]);
+    let id = session.graph.add_node(TaskKind::Render(session.next_task_id), target_kind, size2(w, h), alloc_kind, &inputs[..]);
+    session.next_task_id += 1;
 
     if args.is_present("ROOT") {
         session.graph.add_root(id);
@@ -359,7 +362,17 @@ fn svg(args: &ArgMatches) {
     });
     let mut allocator = GuillotineAllocator::with_options(session.default_size, &session.allocator_options);
     let built_graph = builder.build(session.graph.clone(), &mut allocator);
-    rendergraph::dump_svg(&mut svg_file, &built_graph, &allocator);
+
+    let lookup_name = &|node_id| {
+        for (name, id) in &session.names {
+            if *id == node_id {
+                return name.as_str();
+            }
+        }
+        return &"";
+    };
+
+    rendergraph::dump_svg(&mut svg_file, &built_graph, &allocator, Some(lookup_name));
 }
 
 fn list(args: &ArgMatches) {

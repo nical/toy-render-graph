@@ -9,7 +9,7 @@ pub use euclid::{size2, vec2, point2};
 #[cfg_attr(feature = "serialization", derive(Serialize, Deserialize))]
 #[repr(transparent)]
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
-pub struct NodeId(u32);
+pub struct NodeId(pub(crate) u32);
 
 impl NodeId {
     pub fn to_usize(self) -> usize { self.0 as usize }
@@ -32,7 +32,7 @@ const NUM_TARGET_KINDS: usize = 2;
 #[cfg_attr(feature = "serialization", derive(Serialize, Deserialize))]
 #[derive(Clone)]
 pub struct Node {
-    pub name: String,
+    pub task_kind: TaskKind,
     pub size: Size,
     pub alloc_kind: AllocKind,
     pub dependencies: Vec<NodeId>,
@@ -44,6 +44,13 @@ pub struct Node {
 pub enum AllocKind {
     Fixed(TextureId),
     Dynamic,
+}
+
+#[cfg_attr(feature = "serialization", derive(Serialize, Deserialize))]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub enum TaskKind {
+    Blit,
+    Render(u32),
 }
 
 #[cfg_attr(feature = "serialization", derive(Serialize, Deserialize))]
@@ -61,10 +68,10 @@ impl Graph {
         }
     }
 
-    pub fn add_node(&mut self, name: &str, target_kind: TargetKind, size: Size, alloc_kind: AllocKind, deps: &[NodeId]) -> NodeId {
+    pub fn add_node(&mut self, task_kind: TaskKind, target_kind: TargetKind, size: Size, alloc_kind: AllocKind, deps: &[NodeId]) -> NodeId {
         let id = node_id(self.nodes.len());
         self.nodes.push(Node {
-            name: name.to_string(),
+            task_kind,
             size,
             alloc_kind,
             dependencies: deps.to_vec(),
@@ -399,7 +406,7 @@ fn assign_targets_ping_pong(
                             let size = nodes[dep].size;
                             let target_kind = nodes[dep].target_kind;
                             nodes.push(Node {
-                                name: format!("blit({:?})", dep),
+                                task_kind: TaskKind::Blit,
                                 dependencies: vec![node_id(dep)],
                                 alloc_kind: AllocKind::Dynamic,
                                 size,
@@ -600,7 +607,7 @@ pub fn build_and_print_graph(graph: &Graph, options: BuilderOptions, with_deallo
                 for &node in &pass.targets[target_kind as usize].nodes {
                     println!("     - {:?} {:?}      {}",
                         node,
-                        built_graph.nodes[node.to_usize()].name,
+                        built_graph.nodes[node.to_usize()].task_kind,
                         if let Some(r) = built_graph.allocated_rects[node.to_usize()] {
                             format!("rect: [({}, {}) {}x{}]", r.rectangle.min.x, r.rectangle.min.y, r.rectangle.size().width, r.rectangle.size().height)
                         } else {
@@ -652,23 +659,23 @@ fn simple_graph() {
 fn test_stacked_shadows() {
     let mut graph = Graph::new();
 
-    let pic1 = graph.add_node("picture1", TargetKind::Color, size2(400, 200), AllocKind::Dynamic, &[]);
-    let ds1 = graph.add_node("downscale1", TargetKind::Color, size2(200, 100), AllocKind::Dynamic, &[pic1]);
-    let ds2 = graph.add_node("downscale2", TargetKind::Color, size2(100, 50), AllocKind::Dynamic, &[ds1]);
-    let vblur1 = graph.add_node("vblur1", TargetKind::Color, size2(400, 300), AllocKind::Dynamic, &[ds2]);
-    let hblur1 = graph.add_node("hblur1", TargetKind::Color, size2(500, 300), AllocKind::Dynamic, &[vblur1]);
+    let pic1 = graph.add_node(TargetKind::Color, size2(400, 200), AllocKind::Dynamic, &[]);
+    let ds1 = graph.add_node(TargetKind::Color, size2(200, 100), AllocKind::Dynamic, &[pic1]);
+    let ds2 = graph.add_node(TargetKind::Color, size2(100, 50), AllocKind::Dynamic, &[ds1]);
+    let vblur1 = graph.add_node(TargetKind::Color, size2(400, 300), AllocKind::Dynamic, &[ds2]);
+    let hblur1 = graph.add_node(TargetKind::Color, size2(500, 300), AllocKind::Dynamic, &[vblur1]);
 
-    let vblur2 = graph.add_node("vblur2", TargetKind::Color, size2(400, 350), AllocKind::Fixed(TextureId(1337)), &[ds2]);
-    let hblur2 = graph.add_node("hblur2", TargetKind::Color, size2(550, 350), AllocKind::Dynamic, &[vblur2]);
+    let vblur2 = graph.add_node(TargetKind::Color, size2(400, 350), AllocKind::Fixed(TextureId(1337)), &[ds2]);
+    let hblur2 = graph.add_node(TargetKind::Color, size2(550, 350), AllocKind::Dynamic, &[vblur2]);
 
-    let vblur3 = graph.add_node("vblur3", TargetKind::Color, size2(100, 100), AllocKind::Dynamic, &[ds1]);
-    let hblur3 = graph.add_node("hblur3", TargetKind::Color, size2(100, 100), AllocKind::Dynamic, &[vblur3]);
+    let vblur3 = graph.add_node(TargetKind::Color, size2(100, 100), AllocKind::Dynamic, &[ds1]);
+    let hblur3 = graph.add_node(TargetKind::Color, size2(100, 100), AllocKind::Dynamic, &[vblur3]);
 
-    let ds3 = graph.add_node("downscale3", TargetKind::Color, size2(100, 50), AllocKind::Dynamic, &[ds2]);
-    let vblur4 = graph.add_node("vblur3", TargetKind::Color, size2(500, 400), AllocKind::Dynamic, &[ds3]);
-    let hblur4 = graph.add_node("hblur3", TargetKind::Color, size2(600, 400), AllocKind::Dynamic, &[vblur4]);
+    let ds3 = graph.add_node(TargetKind::Color, size2(100, 50), AllocKind::Dynamic, &[ds2]);
+    let vblur4 = graph.add_node(TargetKind::Color, size2(500, 400), AllocKind::Dynamic, &[ds3]);
+    let hblur4 = graph.add_node(TargetKind::Color, size2(600, 400), AllocKind::Dynamic, &[vblur4]);
 
-    let root = graph.add_node("root_pic", TargetKind::Color, size2(1000, 1000),
+    let root = graph.add_node(TargetKind::Color, size2(1000, 1000),
         AllocKind::Fixed(TextureId(123)),
         &[pic1, hblur1, hblur2, hblur3, hblur4]
     );
