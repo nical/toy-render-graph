@@ -10,7 +10,7 @@ pub use guillotiere::{AtlasAllocator, Allocation, AllocId as RectangleId, Alloca
 pub struct TextureId(pub u32);
 
 impl TextureId {
-    pub fn to_usize(self) -> usize { self.0 as usize }
+    pub fn index(self) -> usize { self.0 as usize }
 }
 
 pub(crate) fn texture_id(idx: usize) -> TextureId {
@@ -156,7 +156,7 @@ impl TextureAllocator for GuillotineAllocator {
     }
 
     fn allocate(&mut self, texture_id: TextureId, size: Size) -> AllocatedRect {
-        let atlas = &mut self.textures[texture_id.to_usize()];
+        let atlas = &mut self.textures[texture_id.index()];
         loop {
             if let Some(alloc) = atlas.allocate(size) {
                 return AllocatedRect {
@@ -174,7 +174,7 @@ impl TextureAllocator for GuillotineAllocator {
     }
 
     fn deallocate(&mut self, id: AllocId) {
-        self.textures[id.texture.to_usize()].deallocate(id.rectangle);
+        self.textures[id.texture.index()].deallocate(id.rectangle);
     }
 }
 
@@ -211,7 +211,7 @@ impl<'l> TextureAllocator for DbgTextureAllocator<'l> {
     fn allocate(&mut self, texture_id: TextureId, size: Size) -> AllocatedRect {
         let alloc = self.allocator.allocate(texture_id, size);
 
-        self.textures[texture_id.to_usize()].insert(alloc.rectangle);
+        self.textures[texture_id.index()].insert(alloc.rectangle);
 
         let mut pixels = 0;
         let mut rects = 0;
@@ -230,7 +230,7 @@ impl<'l> TextureAllocator for DbgTextureAllocator<'l> {
 
     fn deallocate(&mut self, id: AllocId) {
         if self.record_deallocations {
-            //self.textures[texture_id.to_usize()].remove(&id);
+            //self.textures[texture_id.index()].remove(&id);
             self.allocator.deallocate(id);
         }
     }

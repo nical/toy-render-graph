@@ -138,14 +138,14 @@ pub fn dump_svg<'l>(
             layout.start_here();
             let mut allocated_rects = Vec::new();
             for &node in &target.nodes {
-                node_label_rects[node.to_usize()] = Some(layout.push_rectangle(node_height));
+                node_label_rects[node.index()] = Some(layout.push_rectangle(node_height));
                 layout.advance(vertical_spacing);
-                allocated_rects.push(graph.allocated_rects[node.to_usize()].unwrap());
+                allocated_rects.push(graph.allocated_rects[node.index()].unwrap());
             }
 
             let texture_label_rect = layout.push_rectangle(texture_box_height);
 
-            let tex_size = allocator.textures[target.destination.unwrap().to_usize()].size().to_f32();
+            let tex_size = allocator.textures[target.destination.unwrap().index()].size().to_f32();
             let scale = tex_size.width / node_width;
             layout.push_rectangle(tex_size.height / scale);
 
@@ -177,7 +177,7 @@ pub fn dump_svg<'l>(
         if let Some(rect) = rect {
             let pos = rect.min;
             for input in &graph.nodes[i].dependencies {
-                let input_pos = node_label_rects[input.to_usize()].unwrap().min;
+                let input_pos = node_label_rects[input.index()].unwrap().min;
                 let from = input_pos + vec2(node_width, node_height / 2.0);
                 let to = pos + vec2(0.0, node_height / 2.0);
                 link(output, from + vec2(0.0, 1.0), to + vec2(0.0, 1.0), "stroke:black;stroke-opacity:0.4;stroke-width:3px;");
@@ -195,7 +195,7 @@ pub fn dump_svg<'l>(
 
     for &(ref rect, dest, ref alloc_rects) in &texture_info {
         let atlas_min = rect.min + vec2(0.0, texture_box_height);
-        let tex_size = allocator.textures[dest.unwrap().to_usize()].size().to_f32();
+        let tex_size = allocator.textures[dest.unwrap().index()].size().to_f32();
         let scale = tex_size.width / node_width;
         let atlas_rect = FloatRectangle {
             min: atlas_min,

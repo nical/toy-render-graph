@@ -12,7 +12,7 @@ pub use euclid::{size2, vec2, point2};
 pub struct NodeId(pub(crate) u32);
 
 impl NodeId {
-    pub fn to_usize(self) -> usize { self.0 as usize }
+    pub fn index(self) -> usize { self.0 as usize }
 }
 
 fn node_id(idx: usize) -> NodeId {
@@ -246,7 +246,7 @@ fn reset<T: Copy>(vector: &mut Vec<T>, len: usize, val: T) {
 fn cull_nodes(graph: &Graph, active_nodes: &mut Vec<bool>) {
     // Call this function recursively starting from the roots.
     fn mark_active_node(id: NodeId, nodes: &[Node], active_nodes: &mut [bool]) {
-        let idx = id.to_usize();
+        let idx = id.index();
         if active_nodes[idx] {
             return;
         }
@@ -286,12 +286,12 @@ fn create_passes_recursive(
     ) {
         *max_depth = std::cmp::max(*max_depth, rev_pass_index);
 
-        node_rev_passes[node_id.to_usize()] = std::cmp::max(
-            node_rev_passes[node_id.to_usize()],
+        node_rev_passes[node_id.index()] = std::cmp::max(
+            node_rev_passes[node_id.index()],
             rev_pass_index,
         );
 
-        let node = &nodes[node_id.to_usize()];
+        let node = &nodes[node_id.index()];
         for &dep in &node.dependencies {
             create_passes_recursive_impl(
                 dep,
@@ -389,9 +389,9 @@ fn assign_targets_ping_pong(
             passes[p].targets[target_kind_index].destination = Some(current_destination);
 
             for nth_node in 0..passes[p].targets[target_kind_index].nodes.len() {
-                let n = passes[p].targets[target_kind_index].nodes[nth_node].to_usize();
+                let n = passes[p].targets[target_kind_index].nodes[nth_node].index();
                 for nth_dep in 0..nodes[n].dependencies.len() {
-                    let dep = nodes[n].dependencies[nth_dep].to_usize();
+                    let dep = nodes[n].dependencies[nth_dep].index();
                     let dep_pass = node_passes[dep] as usize;
                     let dep_target_kind = nodes[dep].target_kind;
                     // Can't both read and write the same target.
@@ -452,9 +452,9 @@ fn assign_targets_direct(
         dependencies.clear();
         for target in &pass.targets {
             for &pass_node in &target.nodes {
-                for &dep in &nodes[pass_node.to_usize()].dependencies {
-                    let dep_pass = node_passes[dep.to_usize()];
-                    let target_kind = nodes[dep.to_usize()].target_kind;
+                for &dep in &nodes[pass_node.index()].dependencies {
+                    let dep_pass = node_passes[dep.index()];
+                    let target_kind = nodes[dep.index()].target_kind;
                     if let Some(id) = passes[dep_pass as usize].targets[target_kind as usize].destination {
                         dependencies.insert(id);
                     }
@@ -506,7 +506,7 @@ fn allocate_target_rects(
 
     // Mark roots as visited to avoid deallocating their target rects.
     for root in &graph.roots {
-        visited[root.to_usize()] = true;
+        visited[root.index()] = true;
     }
 
     // Visit passes in reverse order and look at the dependencies.
@@ -517,8 +517,8 @@ fn allocate_target_rects(
         let first = last_node_refs.len();
         for target_kind in 0..NUM_TARGET_KINDS {
             for &n in &pass.targets[target_kind].nodes {
-                for &dep in &graph.nodes[n.to_usize()].dependencies {
-                    let dep_idx = dep.to_usize();
+                for &dep in &graph.nodes[n.index()].dependencies {
+                    let dep_idx = dep.index();
                     if !visited[dep_idx] {
                         visited[dep_idx] = true;
                         last_node_refs.push(dep);
@@ -543,7 +543,7 @@ fn allocate_target_rects(
 
             // Allocations needed for this pass.
             for &node in &pass_target.nodes {
-                let node_idx = node.to_usize();
+                let node_idx = node.index();
                 let size = graph.nodes[node_idx].size;
                 allocated_rects[node_idx] = Some(allocator.allocate(texture, size));
             }
@@ -552,7 +552,7 @@ fn allocate_target_rects(
         // Deallocations we can perform after this pass.
         let finished_range = pass_last_node_ranges[pass_index].clone();
         for finished_node in &last_node_refs[finished_range] {
-            let node_idx = finished_node.to_usize();
+            let node_idx = finished_node.index();
             if let Some(allocated_rect) = allocated_rects[node_idx] {
                 allocator.deallocate(
                     allocated_rect.id,
@@ -607,8 +607,8 @@ pub fn build_and_print_graph(graph: &Graph, options: BuilderOptions, with_deallo
                 for &node in &pass.targets[target_kind as usize].nodes {
                     println!("     - {:?} {:?}      {}",
                         node,
-                        built_graph.nodes[node.to_usize()].task_kind,
-                        if let Some(r) = built_graph.allocated_rects[node.to_usize()] {
+                        built_graph.nodes[node.index()].task_kind,
+                        if let Some(r) = built_graph.allocated_rects[node.index()] {
                             format!("rect: [({}, {}) {}x{}]", r.rectangle.min.x, r.rectangle.min.y, r.rectangle.size().width, r.rectangle.size().height)
                         } else {
                             "".to_string()
