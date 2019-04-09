@@ -196,14 +196,14 @@ impl GraphBuilder {
 
         match self.options.targets {
             TargetOptions::Direct => assign_targets_direct(
+                &mut graph,
                 &mut passes,
-                &mut graph.nodes,
                 &mut node_passes,
                 allocator,
             ),
             TargetOptions::PingPong => assign_targets_ping_pong(
+                &mut graph,
                 &mut passes,
-                &mut graph.nodes,
                 &mut node_passes,
                 allocator,
             ),
@@ -278,9 +278,9 @@ fn create_passes_recursive(
     node_passes: &mut [i32],
 ) {
     fn create_passes_recursive_impl(
+        graph: &Graph,
         node_id: NodeId,
         rev_pass_index: usize,
-        nodes: &[Node],
         node_rev_passes: &mut [usize],
         max_depth: &mut usize,
     ) {
@@ -291,12 +291,12 @@ fn create_passes_recursive(
             rev_pass_index,
         );
 
-        let node = &nodes[node_id.index()];
+        let node = &graph.nodes[node_id.index()];
         for &dep in &node.dependencies {
             create_passes_recursive_impl(
+                graph,
                 dep,
                 rev_pass_index + 1,
-                nodes,
                 node_rev_passes,
                 max_depth,
             );
@@ -308,9 +308,9 @@ fn create_passes_recursive(
 
     for &root in &graph.roots {
         create_passes_recursive_impl(
+            &graph,
             root,
             0,
-            &graph.nodes,
             &mut node_rev_passes,
             &mut max_depth,
         );
@@ -350,12 +350,12 @@ fn create_passes_recursive(
 /// In order to ensure that a node never reads and writes from the same target, some
 /// blit nodes may be inserted in the graph.
 fn assign_targets_ping_pong(
+    graph: &mut Graph,
     passes: &mut[Pass],
-    nodes: &mut Vec<Node>,
     node_passes: &mut [i32],
     allocator: &mut dyn TextureAllocator,
 ) {
-    let mut node_redirects = vec![None; nodes.len()];
+    let mut node_redirects = vec![None; graph.nodes.len()];
 
     let texture_ids = [
         // color
@@ -390,10 +390,10 @@ fn assign_targets_ping_pong(
 
             for nth_node in 0..passes[p].targets[target_kind_index].nodes.len() {
                 let n = passes[p].targets[target_kind_index].nodes[nth_node].index();
-                for nth_dep in 0..nodes[n].dependencies.len() {
-                    let dep = nodes[n].dependencies[nth_dep].index();
+                for nth_dep in 0..graph.nodes[n].dependencies.len() {
+                    let dep = graph.nodes[n].dependencies[nth_dep].index();
                     let dep_pass = node_passes[dep] as usize;
-                    let dep_target_kind = nodes[dep].target_kind;
+                    let dep_target_kind = graph.nodes[dep].target_kind;
                     // Can't both read and write the same target.
                     if passes[dep_pass].targets[dep_target_kind as usize].destination == Some(current_destination) {
 
@@ -402,10 +402,10 @@ fn assign_targets_ping_pong(
                             source
                         } else {
                             // Otherwise add a blit task.
-                            let blit_id = node_id(nodes.len());
-                            let size = nodes[dep].size;
-                            let target_kind = nodes[dep].target_kind;
-                            nodes.push(Node {
+                            let blit_id = node_id(graph.nodes.len());
+                            let size = graph.nodes[dep].size;
+                            let target_kind = graph.nodes[dep].target_kind;
+                            graph.nodes.push(Node {
                                 task_kind: TaskKind::Blit,
                                 dependencies: vec![node_id(dep)],
                                 alloc_kind: AllocKind::Dynamic,
@@ -419,7 +419,7 @@ fn assign_targets_ping_pong(
                             blit_id
                         };
 
-                        nodes[n].dependencies[nth_dep] = source;
+                        graph.nodes[n].dependencies[nth_dep] = source;
                     }
                 }
             }
@@ -435,8 +435,8 @@ fn assign_targets_ping_pong(
 /// This method may generate more render targets than assign_targets_ping_pong,
 /// however it doesn't add any extra copying operations.
 fn assign_targets_direct(
+    graph: &mut Graph,
     passes: &mut[Pass],
-    nodes: &mut Vec<Node>,
     node_passes: &mut [i32],
     allocator: &mut dyn TextureAllocator,
 ) {
@@ -452,9 +452,9 @@ fn assign_targets_direct(
         dependencies.clear();
         for target in &pass.targets {
             for &pass_node in &target.nodes {
-                for &dep in &nodes[pass_node.index()].dependencies {
+                for &dep in &graph.nodes[pass_node.index()].dependencies {
                     let dep_pass = node_passes[dep.index()];
-                    let target_kind = nodes[dep.index()].target_kind;
+                    let target_kind = graph.nodes[dep.index()].target_kind;
                     if let Some(id) = passes[dep_pass as usize].targets[target_kind as usize].destination {
                         dependencies.insert(id);
                     }
