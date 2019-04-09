@@ -21,7 +21,7 @@ pub(crate) fn texture_id(idx: usize) -> TextureId {
 
 #[cfg_attr(feature = "serialization", derive(Serialize, Deserialize))]
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
-pub struct AllocatedRect {
+pub struct AllocatedRectangle {
     pub rectangle: Rectangle,
     pub id: AllocId,
 }
@@ -51,14 +51,14 @@ impl TextureArray {
         }
     }
 
-    pub fn allocate(&mut self, size: Size) -> AllocatedRect {
+    pub fn allocate(&mut self, size: Size) -> AllocatedRectangle {
         if self.size.width < size.width || self.size.height < size.height {
             self.resize(size);
         }
 
         if let Some(slice) = self.slices.last_mut() {
             if let Some(alloc) = slice.allocate(size) {
-                return AllocatedRect {
+                return AllocatedRectangle {
                     rectangle: alloc.rectangle,
                     id: AllocId {
                         texture: self.id,
@@ -71,7 +71,7 @@ impl TextureArray {
 
         for slice in &mut self.slices {
             if let Some(alloc) = slice.allocate(size) {
-                return AllocatedRect {
+                return AllocatedRectangle {
                     rectangle: alloc.rectangle,
                     id: AllocId {
                         texture: self.id,
@@ -86,7 +86,7 @@ impl TextureArray {
 
         let alloc = self.slices.last_mut().unwrap().allocate(size).unwrap();
 
-        AllocatedRect {
+        AllocatedRectangle {
             rectangle: alloc.rectangle,
             id: AllocId {
                 texture: self.id,
@@ -120,7 +120,7 @@ impl TextureArray {
 
 pub trait TextureAllocator {
     fn add_texture(&mut self) -> TextureId;
-    fn allocate(&mut self, tex: TextureId, size: Size) -> AllocatedRect;
+    fn allocate(&mut self, tex: TextureId, size: Size) -> AllocatedRectangle;
     fn deallocate(&mut self, id: AllocId);
 }
 
@@ -155,11 +155,11 @@ impl TextureAllocator for GuillotineAllocator {
         texture_id(self.textures.len() - 1)
     }
 
-    fn allocate(&mut self, texture_id: TextureId, size: Size) -> AllocatedRect {
+    fn allocate(&mut self, texture_id: TextureId, size: Size) -> AllocatedRectangle {
         let atlas = &mut self.textures[texture_id.index()];
         loop {
             if let Some(alloc) = atlas.allocate(size) {
-                return AllocatedRect {
+                return AllocatedRectangle {
                     rectangle: alloc.rectangle,
                     id: AllocId {
                         texture: texture_id,
@@ -208,7 +208,7 @@ impl<'l> TextureAllocator for DbgTextureAllocator<'l> {
         self.allocator.add_texture()
     }
 
-    fn allocate(&mut self, texture_id: TextureId, size: Size) -> AllocatedRect {
+    fn allocate(&mut self, texture_id: TextureId, size: Size) -> AllocatedRectangle {
         let alloc = self.allocator.allocate(texture_id, size);
 
         self.textures[texture_id.index()].insert(alloc.rectangle);

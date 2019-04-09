@@ -305,7 +305,7 @@ fn node(args: &ArgMatches) {
     };
 
     let alloc_kind = match args.value_of("FIXED_ALLOC") {
-        Some(_) => AllocKind::Fixed(TextureId(1337)),
+        Some(_) => AllocKind::Fixed(TextureId(1337), point2(0, 0)),
         None => AllocKind::Dynamic,
     };
 
@@ -318,6 +318,8 @@ fn node(args: &ArgMatches) {
     if args.is_present("ROOT") {
         session.graph.add_root(id);
     }
+
+    println!("Added node {}", name);
 
     session.names.insert(name, id);
 

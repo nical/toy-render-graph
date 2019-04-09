@@ -1,10 +1,12 @@
 
-pub use std::i32;
-use crate::allocator::*;
-pub use crate::allocator::{TextureId, TextureAllocator, GuillotineAllocator, DbgTextureAllocator};
+use std::i32;
+use std::ops::Range;
 
 pub use guillotiere::{Rectangle, Size, Point};
 pub use euclid::{size2, vec2, point2};
+
+use crate::allocator::*;
+pub use crate::allocator::{TextureId, TextureAllocator, GuillotineAllocator, DbgTextureAllocator};
 
 #[cfg_attr(feature = "serialization", derive(Serialize, Deserialize))]
 #[repr(transparent)]
@@ -18,6 +20,26 @@ impl NodeId {
 fn node_id(idx: usize) -> NodeId {
     debug_assert!(idx < std::u32::MAX as usize);
     NodeId(idx as u32)
+}
+
+pub struct NodeIdRange {
+    start: u32,
+    end: u32,
+}
+
+impl Iterator for NodeIdRange {
+    type Item = NodeId;
+
+    fn next(&mut self) -> Option<NodeId> {
+        if self.start >= self.end {
+            return None;
+        }
+
+        let result = Some(NodeId(self.start));
+        self.start += 1;
+
+        result
+    }
 }
 
 #[cfg_attr(feature = "serialization", derive(Serialize, Deserialize))]
@@ -35,14 +57,14 @@ pub struct Node {
     pub task_kind: TaskKind,
     pub size: Size,
     pub alloc_kind: AllocKind,
-    pub dependencies: Vec<NodeId>,
+    pub dependencies: Range<u32>,
     pub target_kind: TargetKind,
 }
 
 #[cfg_attr(feature = "serialization", derive(Serialize, Deserialize))]
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum AllocKind {
-    Fixed(TextureId),
+    Fixed(TextureId, Point),
     Dynamic,
 }
 
@@ -57,24 +79,34 @@ pub enum TaskKind {
 #[derive(Clone)]
 pub struct Graph {
     nodes: Vec<Node>,
+    dependencies: Vec<NodeId>,
     roots: Vec<NodeId>,
+}
+
+fn usize_range(u32_range: &Range<u32>) -> Range<usize> {
+    (u32_range.start as usize) .. (u32_range.end as usize)
 }
 
 impl Graph {
     pub fn new() -> Self {
         Graph {
             nodes: Vec::new(),
+            dependencies: Vec::new(),
             roots: Vec::new(),
         }
     }
 
     pub fn add_node(&mut self, task_kind: TaskKind, target_kind: TargetKind, size: Size, alloc_kind: AllocKind, deps: &[NodeId]) -> NodeId {
+        let dep_start = self.dependencies.len() as u32;
+        self.dependencies.extend_from_slice(deps);
+        let dep_end = self.dependencies.len() as u32;
+
         let id = node_id(self.nodes.len());
         self.nodes.push(Node {
             task_kind,
             size,
             alloc_kind,
-            dependencies: deps.to_vec(),
+            dependencies: dep_start..dep_end,
             target_kind,
         });
 
@@ -88,25 +120,60 @@ impl Graph {
     pub fn roots(&self) -> &[NodeId] {
         &self.roots
     }
+
+    pub fn node_ids(&self) -> NodeIdRange {
+        NodeIdRange {
+            start: 0,
+            end: self.nodes.len() as u32,
+        }
+    }
+
+    pub fn num_nodes(&self) -> usize {
+        self.nodes.len()
+    }
+
+    pub fn node_dependencies(&self, node: NodeId) -> &[NodeId] {
+        let range = self.nodes[node.index()].dependencies.clone();
+        &self.dependencies[usize_range(&range)]
+    }
+}
+
+impl std::ops::Index<NodeId> for Graph {
+    type Output = Node;
+    fn index(&self, id: NodeId) -> &Node {
+        &self.nodes[id.index()]
+    }
 }
 
 #[cfg_attr(feature = "serialization", derive(Serialize, Deserialize))]
 pub struct BuiltGraph {
-    pub nodes: Vec<Node>,
-    pub roots: Vec<NodeId>,
-    pub allocated_rects: Vec<Option<AllocatedRect>>,
+    graph: Graph,
     pub passes: Vec<Pass>,
+}
+
+impl std::ops::Deref for BuiltGraph {
+    type Target = Graph;
+    fn deref(&self) -> &Graph {
+        &self.graph
+    }
 }
 
 #[cfg_attr(feature = "serialization", derive(Serialize, Deserialize))]
 pub struct Pass {
     pub targets: [PassTarget; NUM_TARGET_KINDS],
+    // TODO: remove this.
     pub fixed_target: bool,
 }
 
 #[cfg_attr(feature = "serialization", derive(Serialize, Deserialize))]
+pub struct Task {
+    pub node: NodeId,
+    pub rectangle: Rectangle,
+}
+
+#[cfg_attr(feature = "serialization", derive(Serialize, Deserialize))]
 pub struct PassTarget {
-    pub(crate) nodes: Vec<NodeId>,
+    pub(crate) tasks: Vec<Task>,
     pub(crate) destination: Option<TextureId>,
 }
 
@@ -116,7 +183,6 @@ pub enum TargetDestination {
     Dynamic(TextureId),
     Fixed(TextureId),
 }
-
 
 #[cfg_attr(feature = "serialization", derive(Serialize, Deserialize))]
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
@@ -218,16 +284,14 @@ impl GraphBuilder {
         reset(&mut active_nodes, graph.nodes.len(), false);
         allocate_target_rects(
             &graph,
-            &passes,
+            &mut passes,
             &mut active_nodes,
             &mut allocated_rects,
             allocator,
         );
 
         BuiltGraph {
-            nodes: graph.nodes,
-            roots: graph.roots,
-            allocated_rects,
+            graph: graph,
             passes,
         }
     }
@@ -245,7 +309,7 @@ fn reset<T: Copy>(vector: &mut Vec<T>, len: usize, val: T) {
 /// a root of the graph.
 fn cull_nodes(graph: &Graph, active_nodes: &mut Vec<bool>) {
     // Call this function recursively starting from the roots.
-    fn mark_active_node(id: NodeId, nodes: &[Node], active_nodes: &mut [bool]) {
+    fn mark_active_node(graph: &Graph, id: NodeId, active_nodes: &mut [bool]) {
         let idx = id.index();
         if active_nodes[idx] {
             return;
@@ -253,15 +317,15 @@ fn cull_nodes(graph: &Graph, active_nodes: &mut Vec<bool>) {
 
         active_nodes[idx] = true;
 
-        for &dep in &nodes[idx].dependencies {
-            mark_active_node(dep, nodes, active_nodes);
+        for &dep in graph.node_dependencies(id) {
+            mark_active_node(graph, dep, active_nodes);
         }
     }
 
     reset(active_nodes, graph.nodes.len(), false);
 
     for &root in &graph.roots {
-        mark_active_node(root, &graph.nodes, active_nodes);
+        mark_active_node(graph, root, active_nodes);
     }
 }
 
@@ -291,8 +355,7 @@ fn create_passes_recursive(
             rev_pass_index,
         );
 
-        let node = &graph.nodes[node_id.index()];
-        for &dep in &node.dependencies {
+        for &dep in graph.node_dependencies(node_id) {
             create_passes_recursive_impl(
                 graph,
                 dep,
@@ -320,11 +383,11 @@ fn create_passes_recursive(
         passes.push(Pass {
             targets: [
                 PassTarget {
-                    nodes: Vec::new(),
+                    tasks: Vec::new(),
                     destination: None,
                 },
                 PassTarget {
-                    nodes: Vec::new(),
+                    tasks: Vec::new(),
                     destination: None,
                 },
             ],
@@ -339,7 +402,10 @@ fn create_passes_recursive(
 
         let target_kind = graph.nodes[node_idx].target_kind;
         let pass_index = max_depth - node_rev_passes[node_idx];
-        passes[pass_index].targets[target_kind as usize].nodes.push(node_id(node_idx));
+        passes[pass_index].targets[target_kind as usize].tasks.push(Task {
+            node: node_id(node_idx),
+            rectangle: Rectangle::zero(), // Will be set in allocate_target_rects.
+        });
         node_passes[node_idx] = pass_index as i32;
     }
 }
@@ -378,7 +444,7 @@ fn assign_targets_ping_pong(
         }
 
         for target_kind_index in 0..NUM_TARGET_KINDS {
-            if passes[p].targets[target_kind_index].nodes.is_empty() {
+            if passes[p].targets[target_kind_index].tasks.is_empty() {
                 continue;
             }
 
@@ -388,38 +454,47 @@ fn assign_targets_ping_pong(
             let current_destination = texture_ids[target_kind_index][ping_pong];
             passes[p].targets[target_kind_index].destination = Some(current_destination);
 
-            for nth_node in 0..passes[p].targets[target_kind_index].nodes.len() {
-                let n = passes[p].targets[target_kind_index].nodes[nth_node].index();
-                for nth_dep in 0..graph.nodes[n].dependencies.len() {
-                    let dep = graph.nodes[n].dependencies[nth_dep].index();
-                    let dep_pass = node_passes[dep] as usize;
-                    let dep_target_kind = graph.nodes[dep].target_kind;
+            for nth_node in 0..passes[p].targets[target_kind_index].tasks.len() {
+                let node = passes[p].targets[target_kind_index].tasks[nth_node].node;
+                let dep_offset = graph.nodes[node.index()].dependencies.start as usize;
+                for nth_dep in 0..graph.node_dependencies(node).len() {
+                    let dep = graph.dependencies[dep_offset + nth_dep];
+                    let dep_pass = node_passes[dep.index()] as usize;
+                    let dep_target_kind = graph.nodes[dep.index()].target_kind;
                     // Can't both read and write the same target.
                     if passes[dep_pass].targets[dep_target_kind as usize].destination == Some(current_destination) {
 
                         // See if we have already added a blit task to avoid the problem.
-                        let source = if let Some(source) = node_redirects[dep] {
+                        let source = if let Some(source) = node_redirects[dep.index()] {
                             source
                         } else {
                             // Otherwise add a blit task.
                             let blit_id = node_id(graph.nodes.len());
-                            let size = graph.nodes[dep].size;
-                            let target_kind = graph.nodes[dep].target_kind;
+                            let size = graph.nodes[dep.index()].size;
+                            let target_kind = graph.nodes[dep.index()].target_kind;
+                            let blit_dep_index = graph.dependencies.len() as u32;
+                            graph.dependencies.push(dep);
                             graph.nodes.push(Node {
                                 task_kind: TaskKind::Blit,
-                                dependencies: vec![node_id(dep)],
+                                dependencies: blit_dep_index..(blit_dep_index + 1),
                                 alloc_kind: AllocKind::Dynamic,
                                 size,
                                 target_kind,
                             });
-                            node_redirects[dep] = Some(blit_id);
+                            node_redirects[dep.index()] = Some(blit_id);
 
-                            passes[last_dynamic_pass].targets[dep_target_kind as usize].nodes.push(blit_id);
+                            passes[last_dynamic_pass]
+                                .targets[dep_target_kind as usize]
+                                .tasks
+                                .push(Task {
+                                    node: blit_id,
+                                    rectangle: Rectangle::zero(),
+                                });
 
                             blit_id
                         };
 
-                        graph.nodes[n].dependencies[nth_dep] = source;
+                        graph.dependencies[dep_offset + nth_dep] = source;
                     }
                 }
             }
@@ -451,8 +526,8 @@ fn assign_targets_direct(
 
         dependencies.clear();
         for target in &pass.targets {
-            for &pass_node in &target.nodes {
-                for &dep in &graph.nodes[pass_node.index()].dependencies {
+            for task in &target.tasks {
+                for &dep in graph.node_dependencies(task.node) {
                     let dep_pass = node_passes[dep.index()];
                     let target_kind = graph.nodes[dep.index()].target_kind;
                     if let Some(id) = passes[dep_pass as usize].targets[target_kind as usize].destination {
@@ -463,7 +538,7 @@ fn assign_targets_direct(
         }
 
         for target_kind in 0..NUM_TARGET_KINDS {
-            if passes[p].targets[target_kind].nodes.is_empty() {
+            if passes[p].targets[target_kind].tasks.is_empty() {
                 continue;
             }
 
@@ -493,9 +568,9 @@ fn assign_targets_direct(
 /// logic to the TextureAllocator implementation.
 fn allocate_target_rects(
     graph: &Graph,
-    passes: &[Pass],
+    passes: &mut[Pass],
     visited: &mut[bool],
-    allocated_rects: &mut Vec<Option<AllocatedRect>>,
+    allocated_rects: &mut Vec<Option<AllocId>>,
     allocator: &mut dyn TextureAllocator,
 ) {
     let mut last_node_refs: Vec<NodeId> = Vec::with_capacity(graph.nodes.len());
@@ -516,8 +591,8 @@ fn allocate_target_rects(
         pass_index -= 1;
         let first = last_node_refs.len();
         for target_kind in 0..NUM_TARGET_KINDS {
-            for &n in &pass.targets[target_kind].nodes {
-                for &dep in &graph.nodes[n.index()].dependencies {
+            for task in &pass.targets[target_kind].tasks {
+                for &dep in graph.node_dependencies(task.node) {
                     let dep_idx = dep.index();
                     if !visited[dep_idx] {
                         visited[dep_idx] = true;
@@ -530,22 +605,31 @@ fn allocate_target_rects(
     }
 
     // In the second step we go through each pass in order and perform allocations/deallocations.
-    for (pass_index, pass) in passes.iter().enumerate() {
-        if pass.fixed_target {
-            continue;
-        }
-
-        for pass_target in &pass.targets {
-            if pass_target.nodes.is_empty() {
+    for (pass_index, pass) in passes.iter_mut().enumerate() {
+        for pass_target in &mut pass.targets {
+            if pass_target.tasks.is_empty() {
                 continue;
             }
             let texture = pass_target.destination.unwrap();
 
             // Allocations needed for this pass.
-            for &node in &pass_target.nodes {
-                let node_idx = node.index();
+            for task in &mut pass_target.tasks {
+                let node_idx = task.node.index();
+                let node = &graph.nodes[node_idx];
                 let size = graph.nodes[node_idx].size;
-                allocated_rects[node_idx] = Some(allocator.allocate(texture, size));
+                match node.alloc_kind {
+                    AllocKind::Dynamic => {
+                        let alloc = allocator.allocate(texture, size);
+                        task.rectangle = alloc.rectangle;
+                        allocated_rects[node_idx] = Some(alloc.id);
+                    }
+                    AllocKind::Fixed(_, origin) => {
+                        task.rectangle = Rectangle {
+                            min: origin,
+                            max: origin + size.to_vector(),
+                        }
+                    }
+                }
             }
         }
 
@@ -553,10 +637,8 @@ fn allocate_target_rects(
         let finished_range = pass_last_node_ranges[pass_index].clone();
         for finished_node in &last_node_refs[finished_range] {
             let node_idx = finished_node.index();
-            if let Some(allocated_rect) = allocated_rects[node_idx] {
-                allocator.deallocate(
-                    allocated_rect.id,
-                );
+            if let Some(alloc_id) = allocated_rects[node_idx] {
+                allocator.deallocate(alloc_id);
             }
         }
     }
@@ -574,7 +656,7 @@ pub fn build_and_print_graph(graph: &Graph, options: BuilderOptions, with_deallo
     let mut n_nodes = 0;
     for pass in &built_graph.passes {
         for target in &pass.targets {
-            n_nodes += target.nodes.len();
+            n_nodes += target.tasks.len();
         }
     }
 
@@ -604,15 +686,12 @@ pub fn build_and_print_graph(graph: &Graph, options: BuilderOptions, with_deallo
                     target_kind,
                     texture,
                 );
-                for &node in &pass.targets[target_kind as usize].nodes {
-                    println!("     - {:?} {:?}      {}",
-                        node,
-                        built_graph.nodes[node.index()].task_kind,
-                        if let Some(r) = built_graph.allocated_rects[node.index()] {
-                            format!("rect: [({}, {}) {}x{}]", r.rectangle.min.x, r.rectangle.min.y, r.rectangle.size().width, r.rectangle.size().height)
-                        } else {
-                            "".to_string()
-                        },
+                for task in &pass.targets[target_kind as usize].tasks {
+                    let r = &task.rectangle;
+                    println!("     - {:?} {:?}      rect: [({}, {}) {}x{}]",
+                        task.node,
+                        built_graph.nodes[task.node.index()].task_kind,
+                        r.min.x, r.min.y, r.size().width, r.size().height,
                     );
                 }
             }
@@ -633,7 +712,7 @@ fn simple_graph() {
     let n5 = graph.add_node(TaskKind::Render(5), TargetKind::Color, size2(100, 100), AllocKind::Dynamic, &[]);
     let n6 = graph.add_node(TaskKind::Render(6), TargetKind::Color, size2(100, 100), AllocKind::Dynamic, &[n3, n5]);
     let n7 = graph.add_node(TaskKind::Render(7), TargetKind::Color, size2(100, 100), AllocKind::Dynamic, &[n2, n4, n6]);
-    let n8 = graph.add_node(TaskKind::Render(8), TargetKind::Color, size2(800, 600), AllocKind::Fixed(TextureId(100)), &[n7]);
+    let n8 = graph.add_node(TaskKind::Render(8), TargetKind::Color, size2(800, 600), AllocKind::Fixed(TextureId(100), point2(0, 0)), &[n7]);
 
     graph.add_root(n5);
     graph.add_root(n8);
@@ -665,7 +744,7 @@ fn test_stacked_shadows() {
     let vblur1 = graph.add_node(TaskKind::Render(3), TargetKind::Color, size2(400, 300), AllocKind::Dynamic, &[ds2]);
     let hblur1 = graph.add_node(TaskKind::Render(4), TargetKind::Color, size2(500, 300), AllocKind::Dynamic, &[vblur1]);
 
-    let vblur2 = graph.add_node(TaskKind::Render(5), TargetKind::Color, size2(400, 350), AllocKind::Fixed(TextureId(1337)), &[ds2]);
+    let vblur2 = graph.add_node(TaskKind::Render(5), TargetKind::Color, size2(400, 350), AllocKind::Fixed(TextureId(1337), point2(0, 0)), &[ds2]);
     let hblur2 = graph.add_node(TaskKind::Render(6), TargetKind::Color, size2(550, 350), AllocKind::Dynamic, &[vblur2]);
 
     let vblur3 = graph.add_node(TaskKind::Render(7), TargetKind::Color, size2(100, 100), AllocKind::Dynamic, &[ds1]);
@@ -679,7 +758,7 @@ fn test_stacked_shadows() {
         TaskKind::Render(0),
         TargetKind::Color,
         size2(1000, 1000),
-        AllocKind::Fixed(TextureId(123)),
+        AllocKind::Fixed(TextureId(123), point2(0, 0)),
         &[pic1, hblur1, hblur2, hblur3, hblur4]
     );
     graph.add_root(root);
@@ -701,3 +780,8 @@ fn test_stacked_shadows() {
     }
 }
 
+#[test]
+fn size() {
+    println!("{}",std::mem::size_of::<Node>());
+    panic!();
+}

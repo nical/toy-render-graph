@@ -125,22 +125,22 @@ pub fn dump_svg<'l>(
 
     let mut target_rects = Vec::new();
     let mut texture_info = Vec::new();
-    let mut node_label_rects = vec![None; graph.nodes.len()];
+    let mut node_label_rects = vec![None; graph.num_nodes()];
     let mut x = margin;
     let mut max_y: f32 = 0.0;
     for pass in &graph.passes {
         let mut layout = VerticalLayout::new(point2(x, margin), node_width);
         for target in &pass.targets {
-            if target.nodes.is_empty() {
+            if target.tasks.is_empty() {
                 continue;
             }
 
             layout.start_here();
             let mut allocated_rects = Vec::new();
-            for &node in &target.nodes {
-                node_label_rects[node.index()] = Some(layout.push_rectangle(node_height));
+            for task in &target.tasks {
+                node_label_rects[task.node.index()] = Some(layout.push_rectangle(node_height));
                 layout.advance(vertical_spacing);
-                allocated_rects.push(graph.allocated_rects[node.index()].unwrap());
+                allocated_rects.push(task.rectangle);
             }
 
             let texture_label_rect = layout.push_rectangle(texture_box_height);
@@ -173,10 +173,10 @@ pub fn dump_svg<'l>(
         rectangle(output, rect, 5.0, "stroke:none;fill:black;fill-opacity:0.2");
     }
 
-    for (i, rect) in node_label_rects.iter().enumerate() {
-        if let Some(rect) = rect {
+    for id in graph.node_ids() {
+        if let Some(rect) = node_label_rects[id.index()] {
             let pos = rect.min;
-            for input in &graph.nodes[i].dependencies {
+            for input in graph.node_dependencies(id) {
                 let input_pos = node_label_rects[input.index()].unwrap().min;
                 let from = input_pos + vec2(node_width, node_height / 2.0);
                 let to = pos + vec2(0.0, node_height / 2.0);
@@ -210,18 +210,18 @@ pub fn dump_svg<'l>(
 
         // Atlas.
         rectangle(output, &atlas_rect, 0.0, "stroke:none;fill:black;fill-opacity:0.5");
-        for alloc in alloc_rects {
-            let scaled_rect = alloc.rectangle.to_f32() / scale;
+        for rect in alloc_rects {
+            let scaled_rect = rect.to_f32() / scale;
             rectangle(output, &scaled_rect.translate(&atlas_rect.min.to_vector()).inflate(-0.1, -0.1), 0.0, "stroke:none;fill:rgb(50,70,180);fill-opacity:0.8");
         }
     }
 
-    for (i, rect) in node_label_rects.iter().enumerate() {
-        if let Some(rect) = rect {
+    for id in graph.node_ids() {
+        if let Some(rect) = node_label_rects[id.index()] {
             let pos = point2((rect.min.x + rect.max.x)/2.0, rect.min.y + 12.0);
-            let name = format!("{}", names.map(|f| f(NodeId(i as u32))).unwrap_or(""));
-            let kind = format!("TaskKind::{:?}", graph.nodes[i].task_kind);
-            let size = format!("{}", graph.nodes[i].size);
+            let name = format!("{}", names.map(|f| f(id)).unwrap_or(""));
+            let kind = format!("TaskKind::{:?}", graph[id].task_kind);
+            let size = format!("{}", graph[id].size);
             let style = "text-anchor:middle;text-align:center;";
             text(output, &name, 10.0, pos, style);
             let style = "text-anchor:middle;text-align:center;fill:rgb(50,50,50)";
