@@ -7,20 +7,6 @@ pub use guillotiere::{AtlasAllocator, Allocation, AllocId as RectangleId, Alloca
 #[cfg_attr(feature = "serialization", derive(Serialize, Deserialize))]
 #[repr(transparent)]
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
-pub struct NodeId(u32);
-
-impl NodeId {
-    pub fn to_usize(self) -> usize { self.0 as usize }
-}
-
-pub(crate) fn node_id(idx: usize) -> NodeId {
-    debug_assert!(idx < std::u32::MAX as usize);
-    NodeId(idx as u32)
-}
-
-#[cfg_attr(feature = "serialization", derive(Serialize, Deserialize))]
-#[repr(transparent)]
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct TextureId(pub u32);
 
 impl TextureId {
