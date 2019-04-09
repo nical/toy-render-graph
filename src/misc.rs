@@ -1,6 +1,6 @@
 use std::usize;
 use std::collections::HashSet;
-use crate::{Size, Rectangle, size2};
+use crate::{Size, Rectangle};
 
 pub use guillotiere::{AtlasAllocator, Allocation, AllocId as RectangleId, AllocatorOptions};
 
@@ -141,13 +141,23 @@ pub trait TextureAllocator {
 pub struct GuillotineAllocator {
     pub textures: Vec<AtlasAllocator>,
     pub size: Size,
+    pub options: AllocatorOptions,
 }
 
 impl GuillotineAllocator {
-    pub fn new() -> Self {
+    pub fn new(size: Size) -> Self {
         GuillotineAllocator {
             textures: Vec::new(),
-            size: size2(1024, 1024),
+            size,
+            options: guillotiere::DEFAULT_OPTIONS,
+        }
+    }
+
+    pub fn with_options(size: Size, options: &AllocatorOptions) -> Self {
+        GuillotineAllocator {
+            textures: Vec::new(),
+            size,
+            options: options.clone(),
         }
     }
 }
@@ -155,7 +165,7 @@ impl GuillotineAllocator {
 impl TextureAllocator for GuillotineAllocator {
 
     fn add_texture(&mut self) -> TextureId {
-        self.textures.push(AtlasAllocator::new(self.size));
+        self.textures.push(AtlasAllocator::with_options(self.size, &self.options));
         texture_id(self.textures.len() - 1)
     }
 

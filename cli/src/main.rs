@@ -4,6 +4,7 @@ extern crate serde;
 
 use rendergraph::*;
 use guillotiere::euclid::size2;
+use guillotiere::AllocatorOptions;
 use clap::*;
 
 use std::io::prelude::*;
@@ -66,6 +67,13 @@ fn main() {
                 .help("Dump the graph in an SVG file")
                 .value_name("SVG_OUTPUT")
                 .takes_value(true)
+                .required(false)
+            )
+            .arg(Arg::with_name("BUILD")
+                .long("build")
+                .help("Build the graph")
+                .value_name("BUILD")
+                .takes_value(false)
                 .required(false)
             )
         )
@@ -140,6 +148,38 @@ fn main() {
                 .takes_value(true)
                 .required(false)
             )
+            .arg(Arg::with_name("BUILD")
+                .long("build")
+                .help("Build the graph")
+                .value_name("BUILD")
+                .takes_value(false)
+                .required(false)
+            )
+        )
+        .subcommand(
+            SubCommand::with_name("root")
+            .about("Add a node")
+            .arg(Arg::with_name("NAME")
+                .help("Mark a node as root.")
+                .value_name("NAME")
+                .takes_value(true)
+                .required(true)
+            )
+            .arg(Arg::with_name("GRAPH")
+                .short("g")
+                .long("graph")
+                .help("Sets the output graph file to use")
+                .value_name("FILE")
+                .takes_value(true)
+                .required(false)
+            )
+            .arg(Arg::with_name("SVG_OUTPUT")
+                .long("svg")
+                .help("Dump the graph in an SVG file")
+                .value_name("SVG_OUTPUT")
+                .takes_value(true)
+                .required(false)
+            )
         )
         .subcommand(
             SubCommand::with_name("svg")
@@ -160,7 +200,7 @@ fn main() {
         )
         .subcommand(
             SubCommand::with_name("list")
-            .about("List the nodes and allocations in the graph")
+            .about("List the nodes in the graph")
             .arg(Arg::with_name("GRAPH")
                 .short("-a")
                 .long("graph")
@@ -175,15 +215,25 @@ fn main() {
         init(cmd);
     } else if let Some(cmd) = matches.subcommand_matches("node") {
         node(cmd);
+    } else if let Some(cmd) = matches.subcommand_matches("root") {
+        root(cmd);
+    } else if let Some(cmd) = matches.subcommand_matches("build") {
+        let mut session = load_graph(cmd);
+        build(&mut session);
+        write_graph(&session, cmd);
     } else if let Some(cmd) = matches.subcommand_matches("svg") {
         svg(cmd);
+    } else if let Some(cmd) = matches.subcommand_matches("list") {
+        list(cmd);
     }
 }
 
 #[derive(Serialize, Deserialize)]
 pub struct Session {
     graph: Graph,
+    built_graph: Option<BuiltGraph>,
     names: HashMap<String, NodeId>,
+    allocator_options: AllocatorOptions,
     default_size: Size,
     next_id: i32,
 }
@@ -194,7 +244,7 @@ fn init(args: &ArgMatches) {
 
     let default_options = guillotiere::DEFAULT_OPTIONS;
 
-    let options = guillotiere::AllocatorOptions {
+    let allocator_options = AllocatorOptions {
         snap_size: args.value_of("SNAP")
             .map(|s| s.parse::<i32>().unwrap())
             .unwrap_or(default_options.snap_size),
@@ -208,7 +258,9 @@ fn init(args: &ArgMatches) {
 
     let session = Session {
         graph: Graph::new(),
+        built_graph: None,
         names: std::collections::HashMap::default(),
+        allocator_options,
         default_size: size2(w, h),
         next_id: 0,
     };
@@ -218,6 +270,16 @@ fn init(args: &ArgMatches) {
     if args.is_present("SVG_OUTPUT") {
         svg(args);
     }
+}
+
+fn build(session: &mut Session) {
+    let mut builder = GraphBuilder::new(BuilderOptions {
+        passes: PassOptions::Recursive,
+        targets: TargetOptions::PingPong,
+        culling: true,
+    });
+    let mut allocator = GuillotineAllocator::with_options(session.default_size, &session.allocator_options);
+    session.built_graph = Some(builder.build(session.graph.clone(), &mut allocator));
 }
 
 fn node(args: &ArgMatches) {
@@ -256,6 +318,25 @@ fn node(args: &ArgMatches) {
 
     session.names.insert(name, id);
 
+    build(&mut session);
+
+    write_graph(&session, args);
+
+    if args.is_present("SVG_OUTPUT") {
+        svg(args);
+    }
+}
+
+fn root(args: &ArgMatches) {
+    let mut session = load_graph(args);
+
+    let name = args.value_of("NAME").unwrap().to_string();
+    let id = session.names.get(&name).expect("Couldn't find node with this name.");
+
+    session.graph.add_root(*id);
+
+    build(&mut session);
+
     write_graph(&session, args);
 
     if args.is_present("SVG_OUTPUT") {
@@ -266,18 +347,38 @@ fn node(args: &ArgMatches) {
 fn svg(args: &ArgMatches) {
     let session = load_graph(args);
 
-    let svg_file_name = args.value_of("SVG_OUTPUT").unwrap_or("atlas.svg");
+    let svg_file_name = args.value_of("SVG_OUTPUT").unwrap_or("rendergraph.svg");
     let mut svg_file = File::create(svg_file_name).expect(
         "Failed to open the SVG file."
     );
 
-/*
-    guillotiere::dump_svg(&session.atlas, &mut svg_file).expect(
-        "Failed to write into the SVG file."
-    );
-*/
+    let mut builder = GraphBuilder::new(BuilderOptions {
+        passes: PassOptions::Recursive,
+        targets: TargetOptions::PingPong,
+        culling: true,
+    });
+    let mut allocator = GuillotineAllocator::with_options(session.default_size, &session.allocator_options);
+    let built_graph = builder.build(session.graph.clone(), &mut allocator);
+    rendergraph::dump_svg(&mut svg_file, &built_graph, &allocator);
 }
 
+fn list(args: &ArgMatches) {
+    let session = load_graph(args);
+
+    println!("# Nodes");
+    for (name, _) in &session.names {
+        println!(" - {}", name);
+    }
+    println!("# Roots");
+    for &root in session.graph.roots() {
+        for (name, id) in &session.names {
+            if *id == root {
+                println!(" - {}", name);
+                continue;
+            }
+        }
+    }
+}
 
 fn load_graph(args: &ArgMatches) -> Session {
     let file_name = args.value_of("GRAPH").unwrap_or("rendergraph.ron");

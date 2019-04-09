@@ -76,6 +76,10 @@ impl Graph {
     pub fn add_root(&mut self, id: NodeId) {
         self.roots.push(id);
     }
+
+    pub fn roots(&self) -> &[NodeId] {
+        &self.roots
+    }
 }
 
 #[cfg_attr(feature = "serialization", derive(Serialize, Deserialize))]
@@ -552,7 +556,7 @@ fn allocate_target_rects(
 
 pub fn build_and_print_graph(graph: &Graph, options: BuilderOptions, with_deallocations: bool) {
     let mut builder = GraphBuilder::new(options);
-    let mut allocator = GuillotineAllocator::new();
+    let mut allocator = GuillotineAllocator::new(size2(1024, 1024));
     let mut allocator = DbgTextureAllocator::new(&mut allocator);
     allocator.record_deallocations = with_deallocations;
 
@@ -836,17 +840,5 @@ fn test_stacked_shadows() {
             }
         }
     }
-
-/* TODO
-    let mut builder = GraphBuilder::new(BuilderOptions {
-        passes: PassOptions::Recursive,
-        targets: TargetOptions::PingPong,
-        culling: true,
-    });
-    let mut allocator = GuillotineAllocator::new();
-    let built_graph = builder.build(graph.clone(), &mut allocator);
-    let mut file = std::fs::File::create("graph.svg").unwrap();
-    dump_svg(&mut file, &built_graph, &allocator);
-*/
 }
 
