@@ -1,6 +1,6 @@
 use std::io::Write;
 use euclid::{point2, vec2, size2};
-use crate::{FloatPoint, FloatRectangle, FloatSize};
+use crate::{FloatPoint, Rectangle, FloatRectangle, FloatSize};
 use crate::{GuillotineAllocator, BuiltGraph, NodeId};
 
 pub fn rectangle(output: &mut dyn Write, rect: &FloatRectangle, radius: f32, style: &str) {
@@ -54,18 +54,42 @@ pub fn end_svg(output: &mut dyn Write) {
 }
 
 pub fn link(output: &mut Write, from: FloatPoint, to: FloatPoint, style: &str) {
-    let mid_x = (from.x + to.x) * 0.5 ;
 
-    write!(output,
-r#"
-    <path d="M {} {} C {} {} {} {} {} {}" style="fill:none;{}" />
-"#,
-        from.x, from.y,
-        mid_x, from.y,
-        mid_x, to.y,
-        to.x, to.y,
-        style,
-    ).unwrap();
+    // If the link is a straight horizontal line and spans over multiple passes, it
+    // is likely to go stright htough unrlated nodes in a way that makes it look like
+    // they are connected, so we bend the line upward a bit to avoid that.
+    let simple_path = (from.y - to.y).abs() > 1.0 || (to.x - from.x) < 45.0;
+
+    let mid = from.lerp(to, 0.5);
+    if simple_path {
+        write!(output,
+    r#"
+        <path d="M {} {} C {} {} {} {} {} {}" style="fill:none;{}" />
+    "#,
+            from.x, from.y,
+            mid.x, from.y,
+            mid.x, to.y,
+            to.x, to.y,
+            style,
+        ).unwrap();
+    } else {
+        let ctrl1 = from.lerp(mid, 0.5) - vec2(0.0, 25.0);
+        let ctrl2 = to.lerp(mid, 0.5) - vec2(0.0, 25.0);
+        let mid = mid - vec2(0.0, 25.0);
+        write!(output,
+    r#"
+        <path d="M {} {} C {} {} {} {} {} {} C {} {} {} {} {} {}" style="fill:none;{}" />
+    "#,
+            from.x, from.y,
+            ctrl1.x, ctrl1.y,
+            ctrl1.x, mid.y,
+            mid.x, mid.y,
+            ctrl2.x, mid.y,
+            ctrl2.x, ctrl2.y,
+            to.x, to.y,
+            style,
+        ).unwrap();
+    }
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -130,7 +154,7 @@ pub fn dump_svg<'l>(
     let mut max_y: f32 = 0.0;
     for pass in &graph.passes {
         let mut layout = VerticalLayout::new(point2(x, margin), node_width);
-        for target in &pass.targets {
+        for target in &pass.dynamic_targets {
             if target.tasks.is_empty() {
                 continue;
             }
@@ -144,19 +168,50 @@ pub fn dump_svg<'l>(
             }
 
             let texture_label_rect = layout.push_rectangle(texture_box_height);
-
             let tex_size = allocator.textures[target.destination.unwrap().index()].size().to_f32();
             let scale = tex_size.width / node_width;
             layout.push_rectangle(tex_size.height / scale);
 
             target_rects.push(layout.total_rectangle().inflate(5.0, 5.0));
 
+            layout.advance(vertical_spacing * 2.0);
+
             texture_info.push((
                 texture_label_rect,
                 target.destination,
                 allocated_rects,
+                tex_size,
             ));
         }
+
+        for target in &pass.fixed_targets {
+            layout.start_here();
+            let mut allocated_rects = Vec::new();
+            let mut union_rect = Rectangle::zero();
+            for task in &target.tasks {
+                node_label_rects[task.node.index()] = Some(layout.push_rectangle(node_height));
+                layout.advance(vertical_spacing);
+                allocated_rects.push(task.rectangle);
+                union_rect = union_rect.union(&task.rectangle);
+            }
+
+            let texture_label_rect = layout.push_rectangle(texture_box_height);
+            let tex_size = union_rect.size().to_f32();
+            let scale = tex_size.width / node_width;
+            layout.push_rectangle(tex_size.height / scale);
+
+            target_rects.push(layout.total_rectangle().inflate(5.0, 5.0));
+
+            layout.advance(vertical_spacing * 2.0);
+
+            texture_info.push((
+                texture_label_rect,
+                target.destination,
+                allocated_rects,
+                tex_size,
+            ));
+        }
+
         x += node_width + horizontal_spacing;
         max_y = max_y.max(layout.y + 100.0);
     }
@@ -193,9 +248,8 @@ pub fn dump_svg<'l>(
         }
     }
 
-    for &(ref rect, dest, ref alloc_rects) in &texture_info {
+    for &(ref rect, dest, ref alloc_rects, tex_size) in &texture_info {
         let atlas_min = rect.min + vec2(0.0, texture_box_height);
-        let tex_size = allocator.textures[dest.unwrap().index()].size().to_f32();
         let scale = tex_size.width / node_width;
         let atlas_rect = FloatRectangle {
             min: atlas_min,

@@ -22,6 +22,8 @@ fn node_id(idx: usize) -> NodeId {
     NodeId(idx as u32)
 }
 
+#[cfg_attr(feature = "serialization", derive(Serialize, Deserialize))]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct NodeIdRange {
     start: u32,
     end: u32,
@@ -39,6 +41,17 @@ impl Iterator for NodeIdRange {
         self.start += 1;
 
         result
+    }
+}
+
+impl NodeIdRange {
+    pub fn len(&self) -> usize {
+        (self.end - self.start) as usize
+    }
+
+    pub fn get(&self, nth: usize) -> NodeId {
+        assert!(nth < self.len());
+        NodeId(self.start + nth as u32)
     }
 }
 
@@ -160,12 +173,12 @@ impl std::ops::Deref for BuiltGraph {
 
 #[cfg_attr(feature = "serialization", derive(Serialize, Deserialize))]
 pub struct Pass {
-    pub targets: [PassTarget; NUM_TARGET_KINDS],
-    // TODO: remove this.
-    pub fixed_target: bool,
+    pub dynamic_targets: [PassTarget; NUM_TARGET_KINDS],
+    pub fixed_targets: Vec<PassTarget>,
 }
 
 #[cfg_attr(feature = "serialization", derive(Serialize, Deserialize))]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Task {
     pub node: NodeId,
     pub rectangle: Rectangle,
@@ -333,8 +346,6 @@ fn cull_nodes(graph: &Graph, active_nodes: &mut Vec<bool>) {
 ///
 /// This method tries to emulate WebRender's current behavior.
 /// Nodes are executed as late as possible.
-///
-/// TODO: Support fixed target allocations.
 fn create_passes_recursive(
     graph: &Graph,
     active_nodes: &[bool],
@@ -381,7 +392,7 @@ fn create_passes_recursive(
 
     for _ in 0..(max_depth + 1) {
         passes.push(Pass {
-            targets: [
+            dynamic_targets: [
                 PassTarget {
                     tasks: Vec::new(),
                     destination: None,
@@ -391,21 +402,50 @@ fn create_passes_recursive(
                     destination: None,
                 },
             ],
-            fixed_target: false,
+            fixed_targets: Vec::new(),
         });
     }
 
-    for node_idx in 0..graph.nodes.len() {
+    for id in graph.node_ids() {
+        let node_idx = id.index();
         if !active_nodes[node_idx] {
             continue;
         }
 
         let target_kind = graph.nodes[node_idx].target_kind;
         let pass_index = max_depth - node_rev_passes[node_idx];
-        passes[pass_index].targets[target_kind as usize].tasks.push(Task {
-            node: node_id(node_idx),
-            rectangle: Rectangle::zero(), // Will be set in allocate_target_rects.
-        });
+        match graph.nodes[node_idx].alloc_kind {
+            AllocKind::Dynamic => {
+                passes[pass_index].dynamic_targets[target_kind as usize].tasks.push(Task {
+                    node: id,
+                    rectangle: Rectangle::zero(), // Will be set in allocate_target_rects.
+                });
+            }
+            AllocKind::Fixed(texture_id, origin) => {
+                let size = graph.nodes[node_idx].size;
+                let task = Task {
+                    node: id,
+                    rectangle: Rectangle {
+                        min: origin,
+                        max: origin + size.to_vector(),
+                    },
+                };
+                let mut new_target = true;
+                for target in &mut passes[pass_index].fixed_targets {
+                    if target.destination == Some(texture_id) {
+                        new_target = false;
+                        target.tasks.push(task);
+                        break;
+                    }
+                }
+                if new_target {
+                    passes[pass_index].fixed_targets.push(PassTarget {
+                        tasks: vec![task],
+                        destination: Some(texture_id),
+                    });
+                }
+            }
+        }
         node_passes[node_idx] = pass_index as i32;
     }
 }
@@ -436,15 +476,11 @@ fn assign_targets_ping_pong(
         ],
     ];
 
-    let mut last_dynamic_pass = 0;
     let mut nth_dynamic_pass = [0, 0];
     for p in 0..passes.len() {
-        if passes[p].fixed_target {
-            continue;
-        }
-
+        // first deal with dynamic targets
         for target_kind_index in 0..NUM_TARGET_KINDS {
-            if passes[p].targets[target_kind_index].tasks.is_empty() {
+            if passes[p].dynamic_targets[target_kind_index].tasks.is_empty() {
                 continue;
             }
 
@@ -452,17 +488,17 @@ fn assign_targets_ping_pong(
             nth_dynamic_pass[target_kind_index] += 1;
 
             let current_destination = texture_ids[target_kind_index][ping_pong];
-            passes[p].targets[target_kind_index].destination = Some(current_destination);
+            passes[p].dynamic_targets[target_kind_index].destination = Some(current_destination);
 
-            for nth_node in 0..passes[p].targets[target_kind_index].tasks.len() {
-                let node = passes[p].targets[target_kind_index].tasks[nth_node].node;
+            for nth_node in 0..passes[p].dynamic_targets[target_kind_index].tasks.len() {
+                let node = passes[p].dynamic_targets[target_kind_index].tasks[nth_node].node;
                 let dep_offset = graph.nodes[node.index()].dependencies.start as usize;
                 for nth_dep in 0..graph.node_dependencies(node).len() {
                     let dep = graph.dependencies[dep_offset + nth_dep];
                     let dep_pass = node_passes[dep.index()] as usize;
                     let dep_target_kind = graph.nodes[dep.index()].target_kind;
                     // Can't both read and write the same target.
-                    if passes[dep_pass].targets[dep_target_kind as usize].destination == Some(current_destination) {
+                    if passes[dep_pass].dynamic_targets[dep_target_kind as usize].destination == Some(current_destination) {
 
                         // See if we have already added a blit task to avoid the problem.
                         let source = if let Some(source) = node_redirects[dep.index()] {
@@ -483,8 +519,8 @@ fn assign_targets_ping_pong(
                             });
                             node_redirects[dep.index()] = Some(blit_id);
 
-                            passes[last_dynamic_pass]
-                                .targets[dep_target_kind as usize]
+                            passes[p - 1]
+                                .dynamic_targets[dep_target_kind as usize]
                                 .tasks
                                 .push(Task {
                                     node: blit_id,
@@ -498,9 +534,6 @@ fn assign_targets_ping_pong(
                     }
                 }
             }
-        }
-        if !passes[p].fixed_target {
-            last_dynamic_pass = p;
         }
     }
 }
@@ -520,30 +553,27 @@ fn assign_targets_direct(
 
     for p in 0..passes.len() {
         let pass = &passes[p];
-        if pass.fixed_target {
-            continue;
-        }
 
         dependencies.clear();
-        for target in &pass.targets {
+        for target in &pass.dynamic_targets {
             for task in &target.tasks {
                 for &dep in graph.node_dependencies(task.node) {
                     let dep_pass = node_passes[dep.index()];
                     let target_kind = graph.nodes[dep.index()].target_kind;
-                    if let Some(id) = passes[dep_pass as usize].targets[target_kind as usize].destination {
+                    if let Some(id) = passes[dep_pass as usize].dynamic_targets[target_kind as usize].destination {
                         dependencies.insert(id);
                     }
                 }
             }
         }
 
-        for target_kind in 0..NUM_TARGET_KINDS {
-            if passes[p].targets[target_kind].tasks.is_empty() {
+        for target_kind_index in 0..NUM_TARGET_KINDS {
+            if passes[p].dynamic_targets[target_kind_index].tasks.is_empty() {
                 continue;
             }
 
             let mut destination = None;
-            for target_id in &allocated_textures[target_kind] {
+            for target_id in &allocated_textures[target_kind_index] {
                 if !dependencies.contains(target_id) {
                     destination = Some(*target_id);
                     break;
@@ -552,11 +582,11 @@ fn assign_targets_direct(
 
             let destination = destination.unwrap_or_else(|| {
                 let id = allocator.add_texture();
-                allocated_textures[target_kind].push(id);
+                allocated_textures[target_kind_index].push(id);
                 id
             });
 
-            passes[p].targets[target_kind].destination = Some(destination);
+            passes[p].dynamic_targets[target_kind_index].destination = Some(destination);
         }
     }
 }
@@ -591,7 +621,7 @@ fn allocate_target_rects(
         pass_index -= 1;
         let first = last_node_refs.len();
         for target_kind in 0..NUM_TARGET_KINDS {
-            for task in &pass.targets[target_kind].tasks {
+            for task in &pass.dynamic_targets[target_kind].tasks {
                 for &dep in graph.node_dependencies(task.node) {
                     let dep_idx = dep.index();
                     if !visited[dep_idx] {
@@ -606,7 +636,7 @@ fn allocate_target_rects(
 
     // In the second step we go through each pass in order and perform allocations/deallocations.
     for (pass_index, pass) in passes.iter_mut().enumerate() {
-        for pass_target in &mut pass.targets {
+        for pass_target in &mut pass.dynamic_targets {
             if pass_target.tasks.is_empty() {
                 continue;
             }
@@ -655,7 +685,10 @@ pub fn build_and_print_graph(graph: &Graph, options: BuilderOptions, with_deallo
     let n_passes = built_graph.passes.len();
     let mut n_nodes = 0;
     for pass in &built_graph.passes {
-        for target in &pass.targets {
+        for target in &pass.dynamic_targets {
+            n_nodes += target.tasks.len();
+        }
+        for target in &pass.fixed_targets {
             n_nodes += target.tasks.len();
         }
     }
@@ -680,13 +713,9 @@ pub fn build_and_print_graph(graph: &Graph, options: BuilderOptions, with_deallo
         let pass = &built_graph.passes[i];
         println!("# pass {:?}", i);
         for &target_kind in &[TargetKind::Color, TargetKind::Alpha] {
-            if let Some(texture) = pass.targets[target_kind as usize].destination {
-                println!("  * {} {:?} target {:?}:",
-                    if pass.fixed_target { "  fixed" } else { "dynamic" },
-                    target_kind,
-                    texture,
-                );
-                for task in &pass.targets[target_kind as usize].tasks {
+            if let Some(texture) = pass.dynamic_targets[target_kind as usize].destination {
+                println!("  * Dynamic {:?} target {:?}:", target_kind, texture);
+                for task in &pass.dynamic_targets[target_kind as usize].tasks {
                     let r = &task.rectangle;
                     println!("     - {:?} {:?}      rect: [({}, {}) {}x{}]",
                         task.node,
@@ -694,6 +723,18 @@ pub fn build_and_print_graph(graph: &Graph, options: BuilderOptions, with_deallo
                         r.min.x, r.min.y, r.size().width, r.size().height,
                     );
                 }
+            }
+        }
+
+        for target in &pass.fixed_targets {
+            println!("  * Fixed target {:?}:", target.destination.unwrap());
+            for task in &target.tasks {
+                let r = &task.rectangle;
+                println!("     - {:?} {:?}      rect: [({}, {}) {}x{}]",
+                    task.node,
+                    built_graph.nodes[task.node.index()].task_kind,
+                    r.min.x, r.min.y, r.size().width, r.size().height,
+                );
             }
         }
     }
@@ -780,8 +821,3 @@ fn test_stacked_shadows() {
     }
 }
 
-#[test]
-fn size() {
-    println!("{}",std::mem::size_of::<Node>());
-    panic!();
-}

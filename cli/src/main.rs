@@ -305,7 +305,7 @@ fn node(args: &ArgMatches) {
     };
 
     let alloc_kind = match args.value_of("FIXED_ALLOC") {
-        Some(_) => AllocKind::Fixed(TextureId(1337), point2(0, 0)),
+        Some(tex_id) => AllocKind::Fixed(TextureId(tex_id.parse().unwrap()), point2(0, 0)),
         None => AllocKind::Dynamic,
     };
 
@@ -381,8 +381,23 @@ fn list(args: &ArgMatches) {
     let session = load_graph(args);
 
     println!("# Nodes");
-    for (name, _) in &session.names {
-        println!(" - {}", name);
+    for (name, id) in &session.names {
+        let mut deps = String::new();
+        for dep_id in session.graph.node_dependencies(*id) {
+            for (name, id) in &session.names {
+                if *id == *dep_id {
+                    deps += &format!("{}, ", name);
+                    break;
+                }
+            }
+        }
+        // Remove the trailing comma.
+        let deps = if deps.len() > 2 {
+            &deps[0..deps.len()-2]
+        } else {
+            ""
+        };
+        println!(" - {} ({})", name, deps);
     }
     println!("# Roots");
     for &root in session.graph.roots() {
