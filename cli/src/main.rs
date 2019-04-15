@@ -277,7 +277,6 @@ fn init(args: &ArgMatches) {
 fn build(session: &mut Session) {
     let mut builder = GraphBuilder::new(BuilderOptions {
         targets: TargetOptions::PingPong,
-        culling: true,
     });
     let mut allocator = GuillotineAllocator::with_options(session.default_size, &session.allocator_options);
     session.built_graph = Some(builder.build(session.graph.clone(), &mut allocator));
@@ -358,7 +357,6 @@ fn svg(args: &ArgMatches) {
 
     let mut builder = GraphBuilder::new(BuilderOptions {
         targets: TargetOptions::PingPong,
-        culling: true,
     });
     let mut allocator = GuillotineAllocator::with_options(session.default_size, &session.allocator_options);
     let built_graph = builder.build(session.graph.clone(), &mut allocator);

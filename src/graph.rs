@@ -5,7 +5,6 @@ use std::ops::Range;
 pub use guillotiere::{Rectangle, Size, Point};
 pub use euclid::{size2, vec2, point2};
 
-use crate::allocator::*;
 pub use crate::allocator::{TextureId, TextureAllocator, GuillotineAllocator, DbgTextureAllocator};
 
 #[cfg_attr(feature = "serialization", derive(Serialize, Deserialize))]
@@ -208,7 +207,6 @@ pub enum TargetOptions {
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct BuilderOptions {
     pub targets: TargetOptions,
-    pub culling: bool,
 }
 
 #[cfg_attr(feature = "serialization", derive(Serialize, Deserialize))]
@@ -223,43 +221,22 @@ impl GraphBuilder {
 
     pub fn build(&mut self, mut graph: Graph, allocator: &mut dyn TextureAllocator) -> BuiltGraph {
 
-        // Step 1 - Sort the nodes in a valid execution order (nodes appear after
-        // the nodes they depend on.
-        //
-        // We don't have to do anything here because this property is provided
-        // by construction in the Graph data structure.
-        // The next step depends on this property.
-
-        // Step 2 - Mark nodes that contribute to the result of the root nodes
-        // as active.
-        //
-        // This pass is not strictly necessary, but, it prevents nodes that don't
-        // contrbute to the result of the root nodes from being executed.
-
-        let mut active_nodes = Vec::new();
-        if self.options.culling {
-            cull_nodes(&graph, &mut active_nodes);
-        } else {
-            active_nodes = vec![true; graph.nodes.len()];
-        }
-
         let mut passes = Vec::new();
         let mut node_passes = vec![i32::MAX; graph.nodes.len()];
 
 
-        // Step 3 - Assign nodes to passes.
+        // Step 1 - Assign nodes to passes.
         //
         // The main constraint is that nodes must be in a later pass than
         // all of their dependencies.
 
         create_passes(
             &graph,
-            &mut active_nodes,
             &mut passes,
             &mut node_passes,
         );
 
-        // Step 4 - assign render targets to passes.
+        // Step 2 - assign render targets to passes.
         //
         // A render target can be used by several passes as long as no pass
         // both read and write the same render target.
@@ -279,18 +256,14 @@ impl GraphBuilder {
             ),
         }
 
-        // Step 5 - Allocate sub-rects of the render targets for each node.
+        // Step 3 - Allocate sub-rects of the render targets for each node.
         //
         // Several nodes can alias parts of a render target as long no node
         // overwite the result of a node that will be needed later.
 
-        let mut allocated_rects = vec![None; graph.nodes.len()];
-        reset(&mut active_nodes, graph.nodes.len(), false);
         allocate_target_rects(
             &graph,
             &mut passes,
-            &mut active_nodes,
-            &mut allocated_rects,
             allocator,
         );
 
@@ -301,54 +274,27 @@ impl GraphBuilder {
     }
 }
 
-fn reset<T: Copy>(vector: &mut Vec<T>, len: usize, val: T) {
-    vector.clear();
-    vector.reserve(len);
-    for _ in 0..len {
-        vector.push(val);
-    }
-}
-
-/// Generate a vector containing for each node a boolean which is true if the node contributes to
-/// a root of the graph.
-fn cull_nodes(graph: &Graph, active_nodes: &mut Vec<bool>) {
-    // Call this function recursively starting from the roots.
-    fn mark_active_node(graph: &Graph, id: NodeId, active_nodes: &mut [bool]) {
-        let idx = id.index();
-        if active_nodes[idx] {
-            return;
-        }
-
-        active_nodes[idx] = true;
-
-        for &dep in graph.node_dependencies(id) {
-            mark_active_node(graph, dep, active_nodes);
-        }
-    }
-
-    reset(active_nodes, graph.nodes.len(), false);
-
-    for &root in &graph.roots {
-        mark_active_node(graph, root, active_nodes);
-    }
-}
-
 /// Create render passes and assign the nodes to them.
 ///
 /// This method tries to emulate WebRender's current behavior.
 /// Nodes are executed as late as possible.
 fn create_passes(
     graph: &Graph,
-    active_nodes: &[bool],
     passes: &mut Vec<Pass>,
     node_passes: &mut [i32],
 ) {
-    fn assign_depth(
+    // Recursively traverse the graph from the roots and assign a "depth" to each node.
+    // The depth of a node is its maximum distance to a root, used to decide which pass
+    // each node gets assigned to by simply computing `node_pass = max_depth - node_depth`.
+    // This scheme ensures that nodes are executed in passes prior to nodes that depend
+    // on them.
+
+    fn assign_depths(
         graph: &Graph,
         node_id: NodeId,
-        rev_pass_index: usize,
-        node_rev_passes: &mut [usize],
-        max_depth: &mut usize,
+        rev_pass_index: i32,
+        node_rev_passes: &mut [i32],
+        max_depth: &mut i32,
     ) {
         *max_depth = std::cmp::max(*max_depth, rev_pass_index);
 
@@ -358,7 +304,7 @@ fn create_passes(
         );
 
         for &dep in graph.node_dependencies(node_id) {
-            assign_depth(
+            assign_depths(
                 graph,
                 dep,
                 rev_pass_index + 1,
@@ -368,11 +314,14 @@ fn create_passes(
         }
     }
 
+    // Initialize the array with negative values. Once the recusive passes are done, any negative
+    // value left corresponds to nodes that haven't been traversed, which means they are not
+    // contributing to the output of the graph. They won't be assigned to any pass.
+    let mut node_rev_passes = vec![-1; graph.nodes.len()];
     let mut max_depth = 0;
-    let mut node_rev_passes = vec![0; graph.nodes.len()];
 
     for &root in &graph.roots {
-        assign_depth(
+        assign_depths(
             &graph,
             root,
             0,
@@ -399,17 +348,19 @@ fn create_passes(
 
     for id in graph.node_ids() {
         let node_idx = id.index();
-        if !active_nodes[node_idx] {
+        if node_rev_passes[node_idx] < 0 {
+            // This node does not contribute to the output of the graph.
             continue;
         }
 
         let target_kind = graph.nodes[node_idx].target_kind;
-        let pass_index = max_depth - node_rev_passes[node_idx];
+        let pass_index = (max_depth - node_rev_passes[node_idx]) as usize;
         match graph.nodes[node_idx].alloc_kind {
             AllocKind::Dynamic => {
                 passes[pass_index].dynamic_targets[target_kind as usize].tasks.push(Task {
                     node: id,
-                    rectangle: Rectangle::zero(), // Will be set in allocate_target_rects.
+                    // Will be set in allocate_target_rects.
+                    rectangle: Rectangle::zero(),
                 });
             }
             AllocKind::Fixed(texture_id, origin) => {
@@ -610,10 +561,10 @@ fn assign_targets_direct(
 fn allocate_target_rects(
     graph: &Graph,
     passes: &mut[Pass],
-    visited: &mut[bool],
-    allocated_rects: &mut Vec<Option<AllocId>>,
     allocator: &mut dyn TextureAllocator,
 ) {
+    let mut allocated_rects = vec![None; graph.nodes.len()];
+    let mut visited = vec![false; graph.nodes.len()];
     let mut last_node_refs: Vec<NodeId> = Vec::with_capacity(graph.nodes.len());
     let mut pass_last_node_ranges: Vec<std::ops::Range<usize>> = vec![0..0; passes.len()];
 
@@ -705,9 +656,8 @@ pub fn build_and_print_graph(graph: &Graph, options: BuilderOptions, with_deallo
     }
 
     println!(
-        "\n\n------------- deallocations: {:?}, culling: {:?}, targets: {:?}",
+        "\n\n------------- deallocations: {:?}, targets: {:?}",
         with_deallocations,
-        options.culling,
         options.targets
     );
     println!(
@@ -774,7 +724,6 @@ fn simple_graph() {
                 &graph,
                 BuilderOptions {
                     targets: target_option,
-                    culling: true,
                 },
                 with_deallocations,
             )
@@ -817,7 +766,6 @@ fn test_stacked_shadows() {
                 &graph,
                 BuilderOptions {
                     targets: target_option,
-                    culling: true,
                 },
                 with_deallocations,
             )
