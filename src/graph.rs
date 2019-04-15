@@ -199,12 +199,6 @@ pub enum TargetDestination {
 
 #[cfg_attr(feature = "serialization", derive(Serialize, Deserialize))]
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
-pub enum PassOptions {
-    Recursive,
-}
-
-#[cfg_attr(feature = "serialization", derive(Serialize, Deserialize))]
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum TargetOptions {
     Direct,
     PingPong,
@@ -213,7 +207,6 @@ pub enum TargetOptions {
 #[cfg_attr(feature = "serialization", derive(Serialize, Deserialize))]
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct BuilderOptions {
-    pub passes: PassOptions,
     pub targets: TargetOptions,
     pub culling: bool,
 }
@@ -259,14 +252,12 @@ impl GraphBuilder {
         // The main constraint is that nodes must be in a later pass than
         // all of their dependencies.
 
-        match self.options.passes {
-            PassOptions::Recursive => create_passes_recursive(
-                &graph,
-                &mut active_nodes,
-                &mut passes,
-                &mut node_passes,
-            ),
-        }
+        create_passes(
+            &graph,
+            &mut active_nodes,
+            &mut passes,
+            &mut node_passes,
+        );
 
         // Step 4 - assign render targets to passes.
         //
@@ -346,13 +337,13 @@ fn cull_nodes(graph: &Graph, active_nodes: &mut Vec<bool>) {
 ///
 /// This method tries to emulate WebRender's current behavior.
 /// Nodes are executed as late as possible.
-fn create_passes_recursive(
+fn create_passes(
     graph: &Graph,
     active_nodes: &[bool],
     passes: &mut Vec<Pass>,
     node_passes: &mut [i32],
 ) {
-    fn create_passes_recursive_impl(
+    fn assign_depth(
         graph: &Graph,
         node_id: NodeId,
         rev_pass_index: usize,
@@ -367,7 +358,7 @@ fn create_passes_recursive(
         );
 
         for &dep in graph.node_dependencies(node_id) {
-            create_passes_recursive_impl(
+            assign_depth(
                 graph,
                 dep,
                 rev_pass_index + 1,
@@ -381,7 +372,7 @@ fn create_passes_recursive(
     let mut node_rev_passes = vec![0; graph.nodes.len()];
 
     for &root in &graph.roots {
-        create_passes_recursive_impl(
+        assign_depth(
             &graph,
             root,
             0,
@@ -476,9 +467,14 @@ fn assign_targets_ping_pong(
         ],
     ];
 
-    let mut nth_dynamic_pass = [0, 0];
+    let mut nth_dynamic_pass = [
+        // color
+        0,
+        // alpha
+        0,
+    ];
+
     for p in 0..passes.len() {
-        // first deal with dynamic targets
         for target_kind_index in 0..NUM_TARGET_KINDS {
             if passes[p].dynamic_targets[target_kind_index].tasks.is_empty() {
                 continue;
@@ -492,50 +488,65 @@ fn assign_targets_ping_pong(
 
             for nth_node in 0..passes[p].dynamic_targets[target_kind_index].tasks.len() {
                 let node = passes[p].dynamic_targets[target_kind_index].tasks[nth_node].node;
-                let dep_offset = graph.nodes[node.index()].dependencies.start as usize;
-                for nth_dep in 0..graph.node_dependencies(node).len() {
-                    let dep = graph.dependencies[dep_offset + nth_dep];
+                for dep_location in usize_range(&graph.nodes[node.index()].dependencies) {
+                    let dep = graph.dependencies[dep_location];
                     let dep_pass = node_passes[dep.index()] as usize;
                     let dep_target_kind = graph.nodes[dep.index()].target_kind;
+
                     // Can't both read and write the same target.
                     if passes[dep_pass].dynamic_targets[dep_target_kind as usize].destination == Some(current_destination) {
-
-                        // See if we have already added a blit task to avoid the problem.
-                        let source = if let Some(source) = node_redirects[dep.index()] {
-                            source
-                        } else {
-                            // Otherwise add a blit task.
-                            let blit_id = node_id(graph.nodes.len());
-                            let size = graph.nodes[dep.index()].size;
-                            let target_kind = graph.nodes[dep.index()].target_kind;
-                            let blit_dep_index = graph.dependencies.len() as u32;
-                            graph.dependencies.push(dep);
-                            graph.nodes.push(Node {
-                                task_kind: TaskKind::Blit,
-                                dependencies: blit_dep_index..(blit_dep_index + 1),
-                                alloc_kind: AllocKind::Dynamic,
-                                size,
-                                target_kind,
-                            });
-                            node_redirects[dep.index()] = Some(blit_id);
-
-                            passes[p - 1]
-                                .dynamic_targets[dep_target_kind as usize]
-                                .tasks
-                                .push(Task {
-                                    node: blit_id,
-                                    rectangle: Rectangle::zero(),
-                                });
-
-                            blit_id
-                        };
-
-                        graph.dependencies[dep_offset + nth_dep] = source;
+                        graph.dependencies[dep_location] = handle_conflict_using_bit_task(
+                            graph,
+                            passes,
+                            &mut node_redirects,
+                            dep,
+                            dep_target_kind,
+                            p
+                        );
                     }
                 }
             }
         }
     }
+}
+
+fn handle_conflict_using_bit_task(
+    graph: &mut Graph,
+    passes: &mut[Pass],
+    node_redirects: &mut[Option<NodeId>],
+    dep: NodeId,
+    dep_target_kind: TargetKind,
+    pass: usize,
+) -> NodeId {
+    // See if we have already added a blit task to avoid the problem.
+    if let Some(source) = node_redirects[dep.index()] {
+        return source;
+    }
+
+    // Otherwise add a blit task.
+    let blit_id = node_id(graph.nodes.len());
+    let size = graph.nodes[dep.index()].size;
+    let target_kind = graph.nodes[dep.index()].target_kind;
+    let blit_dep_index = graph.dependencies.len() as u32;
+    graph.dependencies.push(dep);
+    graph.nodes.push(Node {
+        task_kind: TaskKind::Blit,
+        dependencies: blit_dep_index..(blit_dep_index + 1),
+        alloc_kind: AllocKind::Dynamic,
+        size,
+        target_kind,
+    });
+    node_redirects[dep.index()] = Some(blit_id);
+
+    passes[pass - 1]
+        .dynamic_targets[dep_target_kind as usize]
+        .tasks
+        .push(Task {
+            node: blit_id,
+            rectangle: Rectangle::zero(),
+        });
+
+    blit_id
 }
 
 /// Assign a render target to each pass without adding nodes to the graph.
@@ -694,10 +705,9 @@ pub fn build_and_print_graph(graph: &Graph, options: BuilderOptions, with_deallo
     }
 
     println!(
-        "\n\n------------- deallocations: {:?}, culling: {:?}, passes: {:?}, targets: {:?}",
+        "\n\n------------- deallocations: {:?}, culling: {:?}, targets: {:?}",
         with_deallocations,
         options.culling,
-        options.passes,
         options.targets
     );
     println!(
@@ -759,18 +769,15 @@ fn simple_graph() {
     graph.add_root(n8);
 
     for &with_deallocations in &[true] {
-        for &pass_option in &[PassOptions::Recursive] {
-            for &target_option in &[TargetOptions::Direct, TargetOptions::PingPong] {
-                build_and_print_graph(
-                    &graph,
-                    BuilderOptions {
-                        passes: pass_option,
-                        targets: target_option,
-                        culling: true,
-                    },
-                    with_deallocations,
-                )
-            }
+        for &target_option in &[TargetOptions::Direct, TargetOptions::PingPong] {
+            build_and_print_graph(
+                &graph,
+                BuilderOptions {
+                    targets: target_option,
+                    culling: true,
+                },
+                with_deallocations,
+            )
         }
     }
 }
@@ -805,18 +812,15 @@ fn test_stacked_shadows() {
     graph.add_root(root);
 
     for &with_deallocations in &[false, true] {
-        for &pass_option in &[PassOptions::Recursive] {
-            for &target_option in &[TargetOptions::Direct, TargetOptions::PingPong] {
-                build_and_print_graph(
-                    &graph,
-                    BuilderOptions {
-                        passes: pass_option,
-                        targets: target_option,
-                        culling: true,
-                    },
-                    with_deallocations,
-                )
-            }
+        for &target_option in &[TargetOptions::Direct, TargetOptions::PingPong] {
+            build_and_print_graph(
+                &graph,
+                BuilderOptions {
+                    targets: target_option,
+                    culling: true,
+                },
+                with_deallocations,
+            )
         }
     }
 }

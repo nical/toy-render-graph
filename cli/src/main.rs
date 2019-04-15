@@ -276,7 +276,6 @@ fn init(args: &ArgMatches) {
 
 fn build(session: &mut Session) {
     let mut builder = GraphBuilder::new(BuilderOptions {
-        passes: PassOptions::Recursive,
         targets: TargetOptions::PingPong,
         culling: true,
     });
@@ -358,7 +357,6 @@ fn svg(args: &ArgMatches) {
     );
 
     let mut builder = GraphBuilder::new(BuilderOptions {
-        passes: PassOptions::Recursive,
         targets: TargetOptions::PingPong,
         culling: true,
     });
