@@ -54,6 +54,14 @@ fn main() {
                 .takes_value(true)
                 .required(false)
             )
+            .arg(Arg::with_name("PING_PONG")
+                .long("ping-pong")
+                .short("p")
+                .help("Enable the ping-pong target allocation strategy.")
+                .value_name("PING_PONG")
+                .takes_value(false)
+                .required(false)
+            )
             .arg(Arg::with_name("GRAPH")
                 .short("g")
                 .long("graph")
@@ -234,6 +242,7 @@ pub struct Session {
     built_graph: Option<BuiltGraph>,
     names: HashMap<String, NodeId>,
     allocator_options: AllocatorOptions,
+    builder_options: BuilderOptions,
     default_size: Size,
     next_name: i32,
     next_task_id: u32,
@@ -257,11 +266,20 @@ fn init(args: &ArgMatches) {
             .unwrap_or(default_options.large_size_threshold),
     };
 
+    let builder_options = BuilderOptions {
+        targets: if args.is_present("PING_PONG") {
+            TargetOptions::PingPong
+        } else {
+            TargetOptions::Direct
+        },
+    };
+
     let session = Session {
         graph: Graph::new(),
         built_graph: None,
         names: std::collections::HashMap::default(),
         allocator_options,
+        builder_options,
         default_size: size2(w, h),
         next_name: 0,
         next_task_id: 0,
@@ -275,9 +293,7 @@ fn init(args: &ArgMatches) {
 }
 
 fn build(session: &mut Session) {
-    let mut builder = GraphBuilder::new(BuilderOptions {
-        targets: TargetOptions::PingPong,
-    });
+    let mut builder = GraphBuilder::new(session.builder_options);
     let mut allocator = GuillotineAllocator::with_options(session.default_size, &session.allocator_options);
     session.built_graph = Some(builder.build(session.graph.clone(), &mut allocator));
 }
@@ -355,9 +371,7 @@ fn svg(args: &ArgMatches) {
         "Failed to open the SVG file."
     );
 
-    let mut builder = GraphBuilder::new(BuilderOptions {
-        targets: TargetOptions::PingPong,
-    });
+    let mut builder = GraphBuilder::new(session.builder_options);
     let mut allocator = GuillotineAllocator::with_options(session.default_size, &session.allocator_options);
     let built_graph = builder.build(session.graph.clone(), &mut allocator);
 
