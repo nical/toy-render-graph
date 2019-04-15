@@ -66,7 +66,7 @@ const NUM_TARGET_KINDS: usize = 2;
 #[cfg_attr(feature = "serialization", derive(Serialize, Deserialize))]
 #[derive(Clone)]
 pub struct Node {
-    pub task_kind: TaskKind,
+    pub task_id: TaskId,
     pub size: Size,
     pub alloc_kind: AllocKind,
     pub dependencies: Range<u32>,
@@ -82,9 +82,9 @@ pub enum AllocKind {
 
 #[cfg_attr(feature = "serialization", derive(Serialize, Deserialize))]
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
-pub enum TaskKind {
+pub enum TaskId {
     Blit,
-    Render(u64),
+    Render(u16, u32),
 }
 
 #[cfg_attr(feature = "serialization", derive(Serialize, Deserialize))]
@@ -108,14 +108,14 @@ impl Graph {
         }
     }
 
-    pub fn add_node(&mut self, task_kind: TaskKind, target_kind: TargetKind, size: Size, alloc_kind: AllocKind, deps: &[NodeId]) -> NodeId {
+    pub fn add_node(&mut self, task_id: TaskId, target_kind: TargetKind, size: Size, alloc_kind: AllocKind, deps: &[NodeId]) -> NodeId {
         let dep_start = self.dependencies.len() as u32;
         self.dependencies.extend_from_slice(deps);
         let dep_end = self.dependencies.len() as u32;
 
         let id = node_id(self.nodes.len());
         self.nodes.push(Node {
-            task_kind,
+            task_id,
             size,
             alloc_kind,
             dependencies: dep_start..dep_end,
@@ -160,7 +160,18 @@ impl std::ops::Index<NodeId> for Graph {
 #[cfg_attr(feature = "serialization", derive(Serialize, Deserialize))]
 pub struct BuiltGraph {
     graph: Graph,
-    pub passes: Vec<Pass>,
+    allocated_rectangles: Vec<Rectangle>,
+    passes: Vec<Pass>,
+}
+
+impl BuiltGraph {
+    pub fn allocated_rectangle(&self, node: NodeId) -> &Rectangle {
+        &self.allocated_rectangles[node.index()]
+    }
+
+    pub fn passes(&self) -> &[Pass] {
+        &self.passes
+    }
 }
 
 impl std::ops::Deref for BuiltGraph {
@@ -179,8 +190,8 @@ pub struct Pass {
 #[cfg_attr(feature = "serialization", derive(Serialize, Deserialize))]
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Task {
-    pub node: NodeId,
-    pub rectangle: Rectangle,
+    pub node_id: NodeId,
+    pub task_id: TaskId,
 }
 
 #[cfg_attr(feature = "serialization", derive(Serialize, Deserialize))]
@@ -256,19 +267,23 @@ impl GraphBuilder {
             ),
         }
 
-        // Step 3 - Allocate sub-rects of the render targets for each node.
+        // Step 3 - Allocate portions of the render targets for each node.
         //
         // Several nodes can alias parts of a render target as long no node
         // overwite the result of a node that will be needed later.
 
+        let mut allocated_rectangles = vec![Rectangle::zero(); graph.nodes.len()];
+
         allocate_target_rects(
             &graph,
             &mut passes,
+            &mut allocated_rectangles,
             allocator,
         );
 
         BuiltGraph {
             graph: graph,
+            allocated_rectangles,
             passes,
         }
     }
@@ -355,22 +370,18 @@ fn create_passes(
 
         let target_kind = graph.nodes[node_idx].target_kind;
         let pass_index = (max_depth - node_rev_passes[node_idx]) as usize;
+        let node = &graph.nodes[node_idx];
         match graph.nodes[node_idx].alloc_kind {
             AllocKind::Dynamic => {
                 passes[pass_index].dynamic_targets[target_kind as usize].tasks.push(Task {
-                    node: id,
-                    // Will be set in allocate_target_rects.
-                    rectangle: Rectangle::zero(),
+                    node_id: id,
+                    task_id: node.task_id,
                 });
             }
-            AllocKind::Fixed(texture_id, origin) => {
-                let size = graph.nodes[node_idx].size;
+            AllocKind::Fixed(texture_id, ..) => {
                 let task = Task {
-                    node: id,
-                    rectangle: Rectangle {
-                        min: origin,
-                        max: origin + size.to_vector(),
-                    },
+                    node_id: id,
+                    task_id: node.task_id,
                 };
                 let mut new_target = true;
                 for target in &mut passes[pass_index].fixed_targets {
@@ -438,7 +449,7 @@ fn assign_targets_ping_pong(
             passes[p].dynamic_targets[target_kind_index].destination = Some(current_destination);
 
             for nth_node in 0..passes[p].dynamic_targets[target_kind_index].tasks.len() {
-                let node = passes[p].dynamic_targets[target_kind_index].tasks[nth_node].node;
+                let node = passes[p].dynamic_targets[target_kind_index].tasks[nth_node].node_id;
                 for dep_location in usize_range(&graph.nodes[node.index()].dependencies) {
                     let dep = graph.dependencies[dep_location];
                     let dep_pass = node_passes[dep.index()] as usize;
@@ -481,7 +492,7 @@ fn handle_conflict_using_bit_task(
     let blit_dep_index = graph.dependencies.len() as u32;
     graph.dependencies.push(dep);
     graph.nodes.push(Node {
-        task_kind: TaskKind::Blit,
+        task_id: TaskId::Blit,
         dependencies: blit_dep_index..(blit_dep_index + 1),
         alloc_kind: AllocKind::Dynamic,
         size,
@@ -493,8 +504,8 @@ fn handle_conflict_using_bit_task(
         .dynamic_targets[dep_target_kind as usize]
         .tasks
         .push(Task {
-            node: blit_id,
-            rectangle: Rectangle::zero(),
+            node_id: blit_id,
+            task_id: TaskId::Blit,
         });
 
     blit_id
@@ -519,7 +530,7 @@ fn assign_targets_direct(
         dependencies.clear();
         for target in &pass.dynamic_targets {
             for task in &target.tasks {
-                for &dep in graph.node_dependencies(task.node) {
+                for &dep in graph.node_dependencies(task.node_id) {
                     let dep_pass = node_passes[dep.index()];
                     let target_kind = graph.nodes[dep.index()].target_kind;
                     if let Some(id) = passes[dep_pass as usize].dynamic_targets[target_kind as usize].destination {
@@ -560,10 +571,13 @@ fn assign_targets_direct(
 /// logic to the TextureAllocator implementation.
 fn allocate_target_rects(
     graph: &Graph,
-    passes: &mut[Pass],
+    passes: &[Pass],
+    allocated_rectangles: &mut[Rectangle],
     allocator: &mut dyn TextureAllocator,
 ) {
-    let mut allocated_rects = vec![None; graph.nodes.len()];
+    // The allocation ids we get from the texture allocator.
+    let mut alloc_ids = vec![None; graph.nodes.len()];
+
     let mut visited = vec![false; graph.nodes.len()];
     let mut last_node_refs: Vec<NodeId> = Vec::with_capacity(graph.nodes.len());
     let mut pass_last_node_ranges: Vec<std::ops::Range<usize>> = vec![0..0; passes.len()];
@@ -584,7 +598,7 @@ fn allocate_target_rects(
         let first = last_node_refs.len();
         for target_kind in 0..NUM_TARGET_KINDS {
             for task in &pass.dynamic_targets[target_kind].tasks {
-                for &dep in graph.node_dependencies(task.node) {
+                for &dep in graph.node_dependencies(task.node_id) {
                     let dep_idx = dep.index();
                     if !visited[dep_idx] {
                         visited[dep_idx] = true;
@@ -597,31 +611,29 @@ fn allocate_target_rects(
     }
 
     // In the second step we go through each pass in order and perform allocations/deallocations.
-    for (pass_index, pass) in passes.iter_mut().enumerate() {
-        for pass_target in &mut pass.dynamic_targets {
+    for (pass_index, pass) in passes.iter().enumerate() {
+        for pass_target in &pass.dynamic_targets {
             if pass_target.tasks.is_empty() {
                 continue;
             }
             let texture = pass_target.destination.unwrap();
 
             // Allocations needed for this pass.
-            for task in &mut pass_target.tasks {
-                let node_idx = task.node.index();
+            for task in &pass_target.tasks {
+                let node_idx = task.node_id.index();
                 let node = &graph.nodes[node_idx];
                 let size = graph.nodes[node_idx].size;
-                match node.alloc_kind {
+                allocated_rectangles[node_idx] = match node.alloc_kind {
                     AllocKind::Dynamic => {
                         let alloc = allocator.allocate(texture, size);
-                        task.rectangle = alloc.rectangle;
-                        allocated_rects[node_idx] = Some(alloc.id);
+                        alloc_ids[node_idx] = Some(alloc.id);
+                        alloc.rectangle
                     }
-                    AllocKind::Fixed(_, origin) => {
-                        task.rectangle = Rectangle {
-                            min: origin,
-                            max: origin + size.to_vector(),
-                        }
+                    AllocKind::Fixed(_, origin) => Rectangle {
+                        min: origin,
+                        max: origin + size.to_vector(),
                     }
-                }
+                };
             }
         }
 
@@ -629,7 +641,7 @@ fn allocate_target_rects(
         let finished_range = pass_last_node_ranges[pass_index].clone();
         for finished_node in &last_node_refs[finished_range] {
             let node_idx = finished_node.index();
-            if let Some(alloc_id) = allocated_rects[node_idx] {
+            if let Some(alloc_id) = alloc_ids[node_idx] {
                 allocator.deallocate(alloc_id);
             }
         }
@@ -676,10 +688,10 @@ pub fn build_and_print_graph(graph: &Graph, options: BuilderOptions, with_deallo
             if let Some(texture) = pass.dynamic_targets[target_kind as usize].destination {
                 println!("  * Dynamic {:?} target {:?}:", target_kind, texture);
                 for task in &pass.dynamic_targets[target_kind as usize].tasks {
-                    let r = &task.rectangle;
+                    let r = built_graph.allocated_rectangle(task.node_id);
                     println!("     - {:?} {:?}      rect: [({}, {}) {}x{}]",
-                        task.node,
-                        built_graph.nodes[task.node.index()].task_kind,
+                        task.node_id,
+                        built_graph.nodes[task.node_id.index()].task_id,
                         r.min.x, r.min.y, r.size().width, r.size().height,
                     );
                 }
@@ -689,10 +701,10 @@ pub fn build_and_print_graph(graph: &Graph, options: BuilderOptions, with_deallo
         for target in &pass.fixed_targets {
             println!("  * Fixed target {:?}:", target.destination.unwrap());
             for task in &target.tasks {
-                let r = &task.rectangle;
+                let r = built_graph.allocated_rectangle(task.node_id);
                 println!("     - {:?} {:?}      rect: [({}, {}) {}x{}]",
-                    task.node,
-                    built_graph.nodes[task.node.index()].task_kind,
+                    task.node_id,
+                    built_graph.nodes[task.node_id.index()].task_id,
                     r.min.x, r.min.y, r.size().width, r.size().height,
                 );
             }
@@ -705,15 +717,15 @@ pub fn build_and_print_graph(graph: &Graph, options: BuilderOptions, with_deallo
 fn simple_graph() {
     let mut graph = Graph::new();
 
-    let n0 = graph.add_node(TaskKind::Render(0), TargetKind::Alpha, size2(100, 100), AllocKind::Dynamic, &[]);
-    let _ = graph.add_node(TaskKind::Render(1), TargetKind::Color, size2(100, 100), AllocKind::Dynamic, &[n0]);
-    let n2 = graph.add_node(TaskKind::Render(2), TargetKind::Color, size2(100, 100), AllocKind::Dynamic, &[]);
-    let n3 = graph.add_node(TaskKind::Render(3), TargetKind::Alpha, size2(100, 100), AllocKind::Dynamic, &[]);
-    let n4 = graph.add_node(TaskKind::Render(4), TargetKind::Alpha, size2(100, 100), AllocKind::Dynamic, &[n2, n3]);
-    let n5 = graph.add_node(TaskKind::Render(5), TargetKind::Color, size2(100, 100), AllocKind::Dynamic, &[]);
-    let n6 = graph.add_node(TaskKind::Render(6), TargetKind::Color, size2(100, 100), AllocKind::Dynamic, &[n3, n5]);
-    let n7 = graph.add_node(TaskKind::Render(7), TargetKind::Color, size2(100, 100), AllocKind::Dynamic, &[n2, n4, n6]);
-    let n8 = graph.add_node(TaskKind::Render(8), TargetKind::Color, size2(800, 600), AllocKind::Fixed(TextureId(100), point2(0, 0)), &[n7]);
+    let n0 = graph.add_node(TaskId::Render(0, 0), TargetKind::Alpha, size2(100, 100), AllocKind::Dynamic, &[]);
+    let _ = graph.add_node(TaskId::Render(0, 1), TargetKind::Color, size2(100, 100), AllocKind::Dynamic, &[n0]);
+    let n2 = graph.add_node(TaskId::Render(0, 2), TargetKind::Color, size2(100, 100), AllocKind::Dynamic, &[]);
+    let n3 = graph.add_node(TaskId::Render(0, 3), TargetKind::Alpha, size2(100, 100), AllocKind::Dynamic, &[]);
+    let n4 = graph.add_node(TaskId::Render(0, 4), TargetKind::Alpha, size2(100, 100), AllocKind::Dynamic, &[n2, n3]);
+    let n5 = graph.add_node(TaskId::Render(0, 5), TargetKind::Color, size2(100, 100), AllocKind::Dynamic, &[]);
+    let n6 = graph.add_node(TaskId::Render(0, 6), TargetKind::Color, size2(100, 100), AllocKind::Dynamic, &[n3, n5]);
+    let n7 = graph.add_node(TaskId::Render(0, 7), TargetKind::Color, size2(100, 100), AllocKind::Dynamic, &[n2, n4, n6]);
+    let n8 = graph.add_node(TaskId::Render(0, 8), TargetKind::Color, size2(800, 600), AllocKind::Fixed(TextureId(100), point2(0, 0)), &[n7]);
 
     graph.add_root(n5);
     graph.add_root(n8);
@@ -735,24 +747,28 @@ fn simple_graph() {
 fn test_stacked_shadows() {
     let mut graph = Graph::new();
 
-    let pic1 = graph.add_node(TaskKind::Render(0), TargetKind::Color, size2(400, 200), AllocKind::Dynamic, &[]);
-    let ds1 = graph.add_node(TaskKind::Render(1), TargetKind::Color, size2(200, 100), AllocKind::Dynamic, &[pic1]);
-    let ds2 = graph.add_node(TaskKind::Render(2), TargetKind::Color, size2(100, 50), AllocKind::Dynamic, &[ds1]);
-    let vblur1 = graph.add_node(TaskKind::Render(3), TargetKind::Color, size2(400, 300), AllocKind::Dynamic, &[ds2]);
-    let hblur1 = graph.add_node(TaskKind::Render(4), TargetKind::Color, size2(500, 300), AllocKind::Dynamic, &[vblur1]);
+    const PICTURE: u16 = 0;
+    const DOWNSCALE: u16 = 1;
+    const BLUR: u16 = 2;
 
-    let vblur2 = graph.add_node(TaskKind::Render(5), TargetKind::Color, size2(400, 350), AllocKind::Fixed(TextureId(1337), point2(0, 0)), &[ds2]);
-    let hblur2 = graph.add_node(TaskKind::Render(6), TargetKind::Color, size2(550, 350), AllocKind::Dynamic, &[vblur2]);
+    let pic1 = graph.add_node(TaskId::Render(PICTURE, 1), TargetKind::Color, size2(400, 200), AllocKind::Dynamic, &[]);
+    let ds1 = graph.add_node(TaskId::Render(DOWNSCALE, 0), TargetKind::Color, size2(200, 100), AllocKind::Dynamic, &[pic1]);
+    let ds2 = graph.add_node(TaskId::Render(DOWNSCALE, 1), TargetKind::Color, size2(100, 50), AllocKind::Dynamic, &[ds1]);
+    let vblur1 = graph.add_node(TaskId::Render(BLUR, 0), TargetKind::Color, size2(400, 300), AllocKind::Dynamic, &[ds2]);
+    let hblur1 = graph.add_node(TaskId::Render(BLUR, 1), TargetKind::Color, size2(500, 300), AllocKind::Dynamic, &[vblur1]);
 
-    let vblur3 = graph.add_node(TaskKind::Render(7), TargetKind::Color, size2(100, 100), AllocKind::Dynamic, &[ds1]);
-    let hblur3 = graph.add_node(TaskKind::Render(8), TargetKind::Color, size2(100, 100), AllocKind::Dynamic, &[vblur3]);
+    let vblur2 = graph.add_node(TaskId::Render(BLUR, 2), TargetKind::Color, size2(400, 350), AllocKind::Fixed(TextureId(1337), point2(0, 0)), &[ds2]);
+    let hblur2 = graph.add_node(TaskId::Render(BLUR, 3), TargetKind::Color, size2(550, 350), AllocKind::Dynamic, &[vblur2]);
 
-    let ds3 = graph.add_node(TaskKind::Render(9), TargetKind::Color, size2(100, 50), AllocKind::Dynamic, &[ds2]);
-    let vblur4 = graph.add_node(TaskKind::Render(10), TargetKind::Color, size2(500, 400), AllocKind::Dynamic, &[ds3]);
-    let hblur4 = graph.add_node(TaskKind::Render(11), TargetKind::Color, size2(600, 400), AllocKind::Dynamic, &[vblur4]);
+    let vblur3 = graph.add_node(TaskId::Render(BLUR, 4), TargetKind::Color, size2(100, 100), AllocKind::Dynamic, &[ds1]);
+    let hblur3 = graph.add_node(TaskId::Render(BLUR, 5), TargetKind::Color, size2(100, 100), AllocKind::Dynamic, &[vblur3]);
+
+    let ds3 = graph.add_node(TaskId::Render(DOWNSCALE, 2), TargetKind::Color, size2(100, 50), AllocKind::Dynamic, &[ds2]);
+    let vblur4 = graph.add_node(TaskId::Render(BLUR, 3), TargetKind::Color, size2(500, 400), AllocKind::Dynamic, &[ds3]);
+    let hblur4 = graph.add_node(TaskId::Render(BLUR, 4), TargetKind::Color, size2(600, 400), AllocKind::Dynamic, &[vblur4]);
 
     let root = graph.add_node(
-        TaskKind::Render(0),
+        TaskId::Render(PICTURE, 0),
         TargetKind::Color,
         size2(1000, 1000),
         AllocKind::Fixed(TextureId(123), point2(0, 0)),

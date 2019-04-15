@@ -236,7 +236,7 @@ pub struct Session {
     allocator_options: AllocatorOptions,
     default_size: Size,
     next_name: i32,
-    next_task_id: u64,
+    next_task_id: u32,
 }
 
 fn init(args: &ArgMatches) {
@@ -310,7 +310,7 @@ fn node(args: &ArgMatches) {
     let w = args.value_of("WIDTH").expect("Missing width.").parse::<i32>().unwrap();
     let h = args.value_of("HEIGHT").expect("Missing height.").parse::<i32>().unwrap();
 
-    let id = session.graph.add_node(TaskKind::Render(session.next_task_id), target_kind, size2(w, h), alloc_kind, &inputs[..]);
+    let id = session.graph.add_node(TaskId::Render(0, session.next_task_id), target_kind, size2(w, h), alloc_kind, &inputs[..]);
     session.next_task_id += 1;
 
     if args.is_present("ROOT") {

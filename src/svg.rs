@@ -152,7 +152,7 @@ pub fn dump_svg<'l>(
     let mut node_label_rects = vec![None; graph.num_nodes()];
     let mut x = margin;
     let mut max_y: f32 = 0.0;
-    for pass in &graph.passes {
+    for pass in graph.passes() {
         let mut layout = VerticalLayout::new(point2(x, margin), node_width);
         for target in &pass.dynamic_targets {
             if target.tasks.is_empty() {
@@ -162,9 +162,9 @@ pub fn dump_svg<'l>(
             layout.start_here();
             let mut allocated_rects = Vec::new();
             for task in &target.tasks {
-                node_label_rects[task.node.index()] = Some(layout.push_rectangle(node_height));
+                node_label_rects[task.node_id.index()] = Some(layout.push_rectangle(node_height));
                 layout.advance(vertical_spacing);
-                allocated_rects.push(task.rectangle);
+                allocated_rects.push(graph.allocated_rectangle(task.node_id));
             }
 
             let texture_label_rect = layout.push_rectangle(texture_box_height);
@@ -189,10 +189,11 @@ pub fn dump_svg<'l>(
             let mut allocated_rects = Vec::new();
             let mut union_rect = Rectangle::zero();
             for task in &target.tasks {
-                node_label_rects[task.node.index()] = Some(layout.push_rectangle(node_height));
+                node_label_rects[task.node_id.index()] = Some(layout.push_rectangle(node_height));
                 layout.advance(vertical_spacing);
-                allocated_rects.push(task.rectangle);
-                union_rect = union_rect.union(&task.rectangle);
+                let r = graph.allocated_rectangle(task.node_id);
+                allocated_rects.push(r);
+                union_rect = union_rect.union(&r);
             }
 
             let texture_label_rect = layout.push_rectangle(texture_box_height);
@@ -274,7 +275,7 @@ pub fn dump_svg<'l>(
         if let Some(rect) = node_label_rects[id.index()] {
             let pos = point2((rect.min.x + rect.max.x)/2.0, rect.min.y + 12.0);
             let name = format!("{}", names.map(|f| f(id)).unwrap_or(""));
-            let kind = format!("TaskKind::{:?}", graph[id].task_kind);
+            let kind = format!("Task: {:?}", graph[id].task_id);
             let size = format!("{}", graph[id].size);
             let style = "text-anchor:middle;text-align:center;";
             text(output, &name, 10.0, pos, style);
