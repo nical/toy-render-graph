@@ -151,6 +151,64 @@ impl Graph {
     pub fn node_dependencies(&self, node: NodeId) -> &[NodeId] {
         &self.nodes[node.index()].dependencies
     }
+
+    pub fn build(mut self, options: &BuilderOptions, allocator: &mut dyn TextureAllocator) -> BuiltGraph {
+
+        let mut passes = Vec::new();
+        let mut node_passes = vec![i32::MAX; self.nodes.len()];
+
+
+        // Step 1 - Assign nodes to passes.
+        //
+        // The main constraint is that nodes must be in a later pass than
+        // all of their dependencies.
+
+        create_passes(
+            &self,
+            &mut passes,
+            &mut node_passes,
+        );
+
+        // Step 2 - assign render targets to passes.
+        //
+        // A render target can be used by several passes as long as no pass
+        // both read and write the same render target.
+
+        match options.targets {
+            TargetOptions::Direct => assign_targets_direct(
+                &mut self,
+                &mut passes,
+                &mut node_passes,
+                allocator,
+            ),
+            TargetOptions::PingPong => assign_targets_ping_pong(
+                &mut self,
+                &mut passes,
+                &mut node_passes,
+                allocator,
+            ),
+        }
+
+        // Step 3 - Allocate portions of the render targets for each node.
+        //
+        // Several nodes can alias parts of a render target as long no node
+        // overwrite the result of a node that will be needed later.
+
+        let mut allocated_rectangles = vec![Rectangle::zero(); self.nodes.len()];
+
+        allocate_target_rects(
+            &mut self,
+            &mut passes,
+            &mut allocated_rectangles,
+            allocator,
+        );
+
+        BuiltGraph {
+            graph: self,
+            allocated_rectangles,
+            passes,
+        }
+    }
 }
 
 impl std::ops::Index<NodeId> for Graph {
@@ -221,75 +279,6 @@ pub enum TargetOptions {
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub struct BuilderOptions {
     pub targets: TargetOptions,
-}
-
-#[cfg_attr(feature = "serialization", derive(Serialize, Deserialize))]
-pub struct GraphBuilder {
-    options: BuilderOptions,
-}
-
-impl GraphBuilder {
-    pub fn new(options: BuilderOptions) -> Self {
-        GraphBuilder { options }
-    }
-
-    pub fn build(&mut self, mut graph: Graph, allocator: &mut dyn TextureAllocator) -> BuiltGraph {
-
-        let mut passes = Vec::new();
-        let mut node_passes = vec![i32::MAX; graph.nodes.len()];
-
-
-        // Step 1 - Assign nodes to passes.
-        //
-        // The main constraint is that nodes must be in a later pass than
-        // all of their dependencies.
-
-        create_passes(
-            &graph,
-            &mut passes,
-            &mut node_passes,
-        );
-
-        // Step 2 - assign render targets to passes.
-        //
-        // A render target can be used by several passes as long as no pass
-        // both read and write the same render target.
-
-        match self.options.targets {
-            TargetOptions::Direct => assign_targets_direct(
-                &mut graph,
-                &mut passes,
-                &mut node_passes,
-                allocator,
-            ),
-            TargetOptions::PingPong => assign_targets_ping_pong(
-                &mut graph,
-                &mut passes,
-                &mut node_passes,
-                allocator,
-            ),
-        }
-
-        // Step 3 - Allocate portions of the render targets for each node.
-        //
-        // Several nodes can alias parts of a render target as long no node
-        // overwrite the result of a node that will be needed later.
-
-        let mut allocated_rectangles = vec![Rectangle::zero(); graph.nodes.len()];
-
-        allocate_target_rects(
-            &graph,
-            &mut passes,
-            &mut allocated_rectangles,
-            allocator,
-        );
-
-        BuiltGraph {
-            graph: graph,
-            allocated_rectangles,
-            passes,
-        }
-    }
 }
 
 /// Create render passes and assign the nodes to them.
@@ -650,12 +639,11 @@ fn allocate_target_rects(
 }
 
 pub fn build_and_print_graph(graph: &Graph, options: BuilderOptions, with_deallocations: bool) {
-    let mut builder = GraphBuilder::new(options);
     let mut allocator = GuillotineAllocator::new(size2(1024, 1024));
     let mut allocator = DbgTextureAllocator::new(&mut allocator);
     allocator.record_deallocations = with_deallocations;
 
-    let built_graph = builder.build(graph.clone(), &mut allocator);
+    let built_graph = graph.clone().build(&options, &mut allocator);
 
     let n_passes = built_graph.passes.len();
     let mut n_nodes = 0;

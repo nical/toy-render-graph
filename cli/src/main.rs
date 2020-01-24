@@ -293,9 +293,8 @@ fn init(args: &ArgMatches) {
 }
 
 fn build(session: &mut Session) {
-    let mut builder = GraphBuilder::new(session.builder_options);
     let mut allocator = GuillotineAllocator::with_options(session.default_size, &session.allocator_options);
-    session.built_graph = Some(builder.build(session.graph.clone(), &mut allocator));
+    session.built_graph = Some(session.graph.clone().build(&session.builder_options, &mut allocator));
 }
 
 fn node(args: &ArgMatches) {
@@ -371,9 +370,8 @@ fn svg(args: &ArgMatches) {
         "Failed to open the SVG file."
     );
 
-    let mut builder = GraphBuilder::new(session.builder_options);
     let mut allocator = GuillotineAllocator::with_options(session.default_size, &session.allocator_options);
-    let built_graph = builder.build(session.graph.clone(), &mut allocator);
+    let built_graph = session.graph.clone().build(&session.builder_options, &mut allocator);
 
     let lookup_name = &|node_id| {
         for (name, id) in &session.names {

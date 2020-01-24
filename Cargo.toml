@@ -19,7 +19,7 @@ harness = false
 
 [features]
 checks = []
-serialization = ["serde", "guillotiere/serialization"]
+serialization = ["serde", "guillotiere/serialization", "smallvec/serde"]
 
 [workspace]
 members = ["cli"]
