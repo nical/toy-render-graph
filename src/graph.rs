@@ -1,6 +1,6 @@
 
 use std::i32;
-use std::ops::Range;
+use smallvec::SmallVec;
 
 pub use guillotiere::{Rectangle, Size, Point};
 pub use euclid::{size2, vec2, point2};
@@ -31,6 +31,7 @@ pub struct NodeIdRange {
 impl Iterator for NodeIdRange {
     type Item = NodeId;
 
+    #[inline]
     fn next(&mut self) -> Option<NodeId> {
         if self.start >= self.end {
             return None;
@@ -44,10 +45,12 @@ impl Iterator for NodeIdRange {
 }
 
 impl NodeIdRange {
+    #[inline]
     pub fn len(&self) -> usize {
         (self.end - self.start) as usize
     }
 
+    #[inline]
     pub fn get(&self, nth: usize) -> NodeId {
         assert!(nth < self.len());
         NodeId(self.start + nth as u32)
@@ -69,7 +72,7 @@ pub struct Node {
     pub task_id: TaskId,
     pub size: Size,
     pub alloc_kind: AllocKind,
-    pub dependencies: Range<u32>,
+    pub dependencies: SmallVec<[NodeId; 2]>,
     pub target_kind: TargetKind,
 }
 
@@ -83,7 +86,7 @@ pub enum AllocKind {
 #[cfg_attr(feature = "serialization", derive(Serialize, Deserialize))]
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum TaskId {
-    Blit,
+    Copy,
     Render(u16, u32),
 }
 
@@ -91,38 +94,39 @@ pub enum TaskId {
 #[derive(Clone)]
 pub struct Graph {
     nodes: Vec<Node>,
-    dependencies: Vec<NodeId>,
     roots: Vec<NodeId>,
 }
 
-fn usize_range(u32_range: &Range<u32>) -> Range<usize> {
-    (u32_range.start as usize) .. (u32_range.end as usize)
-}
-
 impl Graph {
+    pub fn with_capacity(nodes: usize, roots: usize) -> Self {
+        Graph {
+            nodes: Vec::with_capacity(nodes),
+            roots: Vec::with_capacity(roots),
+        }
+    }
+
     pub fn new() -> Self {
         Graph {
             nodes: Vec::new(),
-            dependencies: Vec::new(),
             roots: Vec::new(),
         }
     }
 
     pub fn add_node(&mut self, task_id: TaskId, target_kind: TargetKind, size: Size, alloc_kind: AllocKind, deps: &[NodeId]) -> NodeId {
-        let dep_start = self.dependencies.len() as u32;
-        self.dependencies.extend_from_slice(deps);
-        let dep_end = self.dependencies.len() as u32;
-
         let id = node_id(self.nodes.len());
         self.nodes.push(Node {
             task_id,
             size,
             alloc_kind,
-            dependencies: dep_start..dep_end,
+            dependencies: SmallVec::from_slice(deps),
             target_kind,
         });
 
         id
+    }
+
+    pub fn add_dependency(&mut self, node: NodeId, dep: NodeId) {
+        self.nodes[node.index()].dependencies.push(dep);
     }
 
     pub fn add_root(&mut self, id: NodeId) {
@@ -145,8 +149,7 @@ impl Graph {
     }
 
     pub fn node_dependencies(&self, node: NodeId) -> &[NodeId] {
-        let range = self.nodes[node.index()].dependencies.clone();
-        &self.dependencies[usize_range(&range)]
+        &self.nodes[node.index()].dependencies
     }
 }
 
@@ -318,7 +321,7 @@ fn create_passes(
             rev_pass_index,
         );
 
-        for &dep in graph.node_dependencies(node_id) {
+        for &dep in &graph.nodes[node_id.index()].dependencies {
             assign_depths(
                 graph,
                 dep,
@@ -450,14 +453,14 @@ fn assign_targets_ping_pong(
 
             for nth_node in 0..passes[p].dynamic_targets[target_kind_index].tasks.len() {
                 let node = passes[p].dynamic_targets[target_kind_index].tasks[nth_node].node_id;
-                for dep_location in usize_range(&graph.nodes[node.index()].dependencies) {
-                    let dep = graph.dependencies[dep_location];
+                for dep_idx in 0..graph.nodes[node.index()].dependencies.len() {
+                    let dep = graph.nodes[node.index()].dependencies[dep_idx];
                     let dep_pass = node_passes[dep.index()] as usize;
                     let dep_target_kind = graph.nodes[dep.index()].target_kind;
 
                     // Can't both read and write the same target.
                     if passes[dep_pass].dynamic_targets[dep_target_kind as usize].destination == Some(current_destination) {
-                        graph.dependencies[dep_location] = handle_conflict_using_bit_task(
+                        graph.nodes[node.index()].dependencies[dep_idx] = handle_conflict_using_blit_task(
                             graph,
                             passes,
                             &mut node_redirects,
@@ -472,7 +475,7 @@ fn assign_targets_ping_pong(
     }
 }
 
-fn handle_conflict_using_bit_task(
+fn handle_conflict_using_blit_task(
     graph: &mut Graph,
     passes: &mut[Pass],
     node_redirects: &mut[Option<NodeId>],
@@ -489,11 +492,9 @@ fn handle_conflict_using_bit_task(
     let blit_id = node_id(graph.nodes.len());
     let size = graph.nodes[dep.index()].size;
     let target_kind = graph.nodes[dep.index()].target_kind;
-    let blit_dep_index = graph.dependencies.len() as u32;
-    graph.dependencies.push(dep);
     graph.nodes.push(Node {
-        task_id: TaskId::Blit,
-        dependencies: blit_dep_index..(blit_dep_index + 1),
+        task_id: TaskId::Copy,
+        dependencies: smallvec![dep],
         alloc_kind: AllocKind::Dynamic,
         size,
         target_kind,
@@ -505,7 +506,7 @@ fn handle_conflict_using_bit_task(
         .tasks
         .push(Task {
             node_id: blit_id,
-            task_id: TaskId::Blit,
+            task_id: TaskId::Copy,
         });
 
     blit_id

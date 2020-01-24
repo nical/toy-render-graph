@@ -3,6 +3,8 @@ pub extern crate guillotiere;
 #[cfg(feature = "serialization")]
 #[macro_use]
 pub extern crate serde;
+#[macro_use]
+pub extern crate smallvec;
 
 mod graph;
 mod allocator;

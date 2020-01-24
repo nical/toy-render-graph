@@ -53,7 +53,7 @@ pub fn end_svg(output: &mut dyn Write) {
     write!(output, "</svg>").unwrap();
 }
 
-pub fn link(output: &mut Write, from: FloatPoint, to: FloatPoint, style: &str) {
+pub fn link(output: &mut dyn Write, from: FloatPoint, to: FloatPoint, style: &str) {
 
     // If the link is a straight horizontal line and spans over multiple passes, it
     // is likely to go stright htough unrlated nodes in a way that makes it look like
