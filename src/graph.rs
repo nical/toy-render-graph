@@ -66,6 +66,21 @@ pub enum TargetKind {
 
 const NUM_TARGET_KINDS: usize = 2;
 
+pub trait GraphBuilder {
+    fn add_node(
+        &mut self,
+        task_id: TaskId,
+        target_kind: TargetKind,
+        size: Size,
+        alloc_kind: AllocKind,
+        deps: &[NodeId]
+    ) -> NodeId;
+
+    fn add_dependency(&mut self, node: NodeId, dep: NodeId);
+
+    fn add_root(&mut self, node: NodeId);
+}
+
 #[cfg_attr(feature = "serialization", derive(Serialize, Deserialize))]
 #[derive(Clone)]
 pub struct Node {
@@ -208,6 +223,27 @@ impl Graph {
             allocated_rectangles,
             passes,
         }
+    }
+}
+
+impl GraphBuilder for Graph {
+    fn add_node(
+        &mut self,
+        task_id: TaskId,
+        target_kind: TargetKind,
+        size: Size,
+        alloc_kind: AllocKind,
+        deps: &[NodeId]
+    ) -> NodeId {
+        Graph::add_node(self, task_id, target_kind, size, alloc_kind, deps)
+    }
+
+    fn add_dependency(&mut self, node: NodeId, dep: NodeId) {
+        Graph::add_dependency(self, node, dep);
+    }
+
+    fn add_root(&mut self, node: NodeId) {
+        Graph::add_root(self, node);
     }
 }
 

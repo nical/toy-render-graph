@@ -18,5 +18,3 @@ pub use svg::dump_svg;
 type FloatRectangle = euclid::Box2D<f32>;
 type FloatPoint = euclid::Point2D<f32>;
 type FloatSize = euclid::Size2D<f32>;
-
-

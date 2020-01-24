@@ -14,14 +14,14 @@ enum Edit {
 }
 
 #[derive(Clone)]
-pub struct ParallelGraphBuilder {
+pub struct RemoteGraphBuilder {
     next_node_id: Arc<AtomicUsize>,
     sender: Sender<Edit>,
 }
 
-impl ParallelGraphBuilder {
-    pub fn add_node(
-        &self,
+impl GraphBuilder for RemoteGraphBuilder {
+    fn add_node(
+        &mut self,
         task_id: TaskId,
         target_kind: TargetKind,
         size: Size,
@@ -43,40 +43,39 @@ impl ParallelGraphBuilder {
         id
     }
 
-    pub fn add_dependency(&self, node: NodeId, dep: NodeId) {
+    fn add_dependency(&mut self, node: NodeId, dep: NodeId) {
         self.sender.send(Edit::AddDependency(node, dep)).unwrap();
     }
 
-    pub fn add_root(&self, node: NodeId) {
+    fn add_root(&mut self, node: NodeId) {
         self.sender.send(Edit::AddRoot(node)).unwrap();
     }
 }
 
-
-pub struct ParallelGraphReceiver {
+pub struct ParallelGraphBuilder {
     next_node_id: Arc<AtomicUsize>,
     sender: Sender<Edit>,
     receiver: Receiver<Edit>,
 }
 
-impl ParallelGraphReceiver {
+impl ParallelGraphBuilder {
     pub fn new() -> Self {
         let (sender, receiver) = channel();
-        ParallelGraphReceiver {
+        ParallelGraphBuilder {
             next_node_id: Arc::new(AtomicUsize::new(0)),
             sender,
             receiver,
         }
     }
 
-    pub fn new_builder(&self) -> ParallelGraphBuilder {
-        ParallelGraphBuilder {
+    pub fn new_remote(&self) -> RemoteGraphBuilder {
+        RemoteGraphBuilder {
             next_node_id: self.next_node_id.clone(),
             sender: self.sender.clone(),
         }
     }
 
-    pub fn resolve(&self) -> Graph {
+    pub fn join(&self) -> Graph {
         let capacity = self.next_node_id.load(Ordering::SeqCst) - 1;
         self.next_node_id.store(0, Ordering::SeqCst);
 
