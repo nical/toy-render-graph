@@ -8,6 +8,7 @@ pub extern crate smallvec;
 
 mod graph;
 mod allocator;
+pub mod parallel;
 pub mod svg;
 
 pub use graph::*;

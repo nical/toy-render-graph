@@ -16,7 +16,7 @@ impl NodeId {
     pub fn index(self) -> usize { self.0 as usize }
 }
 
-fn node_id(idx: usize) -> NodeId {
+pub(crate) fn node_id(idx: usize) -> NodeId {
     debug_assert!(idx < std::u32::MAX as usize);
     NodeId(idx as u32)
 }
@@ -93,8 +93,8 @@ pub enum TaskId {
 #[cfg_attr(feature = "serialization", derive(Serialize, Deserialize))]
 #[derive(Clone)]
 pub struct Graph {
-    nodes: Vec<Node>,
-    roots: Vec<NodeId>,
+    pub(crate) nodes: Vec<Node>,
+    pub(crate) roots: Vec<NodeId>,
 }
 
 impl Graph {
@@ -273,7 +273,7 @@ impl GraphBuilder {
         // Step 3 - Allocate portions of the render targets for each node.
         //
         // Several nodes can alias parts of a render target as long no node
-        // overwite the result of a node that will be needed later.
+        // overwrite the result of a node that will be needed later.
 
         let mut allocated_rectangles = vec![Rectangle::zero(); graph.nodes.len()];
 
@@ -410,7 +410,7 @@ fn create_passes(
 /// two render targets.
 ///
 /// In order to ensure that a node never reads and writes from the same target, some
-/// blit nodes may be inserted in the graph.
+/// copy nodes may be inserted in the graph.
 fn assign_targets_ping_pong(
     graph: &mut Graph,
     passes: &mut[Pass],
@@ -460,7 +460,7 @@ fn assign_targets_ping_pong(
 
                     // Can't both read and write the same target.
                     if passes[dep_pass].dynamic_targets[dep_target_kind as usize].destination == Some(current_destination) {
-                        graph.nodes[node.index()].dependencies[dep_idx] = handle_conflict_using_blit_task(
+                        graph.nodes[node.index()].dependencies[dep_idx] = handle_conflict_using_copy_task(
                             graph,
                             passes,
                             &mut node_redirects,
@@ -475,7 +475,7 @@ fn assign_targets_ping_pong(
     }
 }
 
-fn handle_conflict_using_blit_task(
+fn handle_conflict_using_copy_task(
     graph: &mut Graph,
     passes: &mut[Pass],
     node_redirects: &mut[Option<NodeId>],
@@ -483,13 +483,13 @@ fn handle_conflict_using_blit_task(
     dep_target_kind: TargetKind,
     pass: usize,
 ) -> NodeId {
-    // See if we have already added a blit task to avoid the problem.
+    // See if we have already added a copy task to avoid the problem.
     if let Some(source) = node_redirects[dep.index()] {
         return source;
     }
 
-    // Otherwise add a blit task.
-    let blit_id = node_id(graph.nodes.len());
+    // Otherwise add a copy task.
+    let copy_id = node_id(graph.nodes.len());
     let size = graph.nodes[dep.index()].size;
     let target_kind = graph.nodes[dep.index()].target_kind;
     graph.nodes.push(Node {
@@ -499,17 +499,17 @@ fn handle_conflict_using_blit_task(
         size,
         target_kind,
     });
-    node_redirects[dep.index()] = Some(blit_id);
+    node_redirects[dep.index()] = Some(copy_id);
 
     passes[pass - 1]
         .dynamic_targets[dep_target_kind as usize]
         .tasks
         .push(Task {
-            node_id: blit_id,
+            node_id: copy_id,
             task_id: TaskId::Copy,
         });
 
-    blit_id
+    copy_id
 }
 
 /// Assign a render target to each pass without adding nodes to the graph.
@@ -713,7 +713,6 @@ pub fn build_and_print_graph(graph: &Graph, options: BuilderOptions, with_deallo
     }
 }
 
-
 #[test]
 fn simple_graph() {
     let mut graph = Graph::new();
@@ -789,4 +788,3 @@ fn test_stacked_shadows() {
         }
     }
 }
-
